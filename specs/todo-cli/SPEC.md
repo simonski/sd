@@ -1,4 +1,4 @@
-# Spec: `td` — A CLI Todo Tool
+# Spec: `todo` — A CLI Todo Tool
 
 > **Status**: DRAFT  
 > **Version**: 0.1.0  
