@@ -78,6 +78,7 @@ type interaction struct {
 }
 
 type conversationMessage struct {
+	Dt   string `json:"dt"`
 	Role string `json:"role"`
 	Text string `json:"text"`
 }
@@ -1705,6 +1706,9 @@ func migrateConversationLogs(repoRoot, interactionsPath string, interactions []i
 			continue
 		}
 		if _, err := os.Stat(abs); err == nil {
+			if err := ensureConversationLogHasDT(abs); err != nil {
+				return err
+			}
 			created[rel] = struct{}{}
 			changed = true
 			if oldStdin != "" {
@@ -2318,25 +2322,30 @@ func buildConversationMessages(stdinRaw, stdoutRaw []byte) []conversationMessage
 		case strings.HasPrefix(line, "User: "):
 			text := strings.TrimSpace(strings.TrimPrefix(line, "User: "))
 			if text != "" {
-				out = append(out, conversationMessage{Role: "user", Text: text})
+				out = append(out, conversationMessage{Dt: time.Now().UTC().Format(time.RFC3339), Role: "user", Text: text})
 			}
 		case strings.HasPrefix(line, "Assistant: "):
 			text := strings.TrimSpace(strings.TrimPrefix(line, "Assistant: "))
 			if text != "" {
-				out = append(out, conversationMessage{Role: "assistant", Text: text})
+				out = append(out, conversationMessage{Dt: time.Now().UTC().Format(time.RFC3339), Role: "assistant", Text: text})
 			}
 		}
 	}
 	if len(out) == 0 {
 		// Fallback: preserve at least cleaned user input as one message.
 		if text := strings.TrimSpace(buildInputPreviewFromRaw(stdinRaw)); text != "" {
-			out = append(out, conversationMessage{Role: "user", Text: text})
+			out = append(out, conversationMessage{Dt: time.Now().UTC().Format(time.RFC3339), Role: "user", Text: text})
 		}
 	}
 	return out
 }
 
 func writeConversationLog(path string, messages []conversationMessage) error {
+	for i := range messages {
+		if strings.TrimSpace(messages[i].Dt) == "" {
+			messages[i].Dt = time.Now().UTC().Format(time.RFC3339)
+		}
+	}
 	raw, err := json.MarshalIndent(messages, "", "  ")
 	if err != nil {
 		return err
@@ -2354,6 +2363,24 @@ func readConversationLog(path string) ([]conversationMessage, error) {
 		return nil, err
 	}
 	return messages, nil
+}
+
+func ensureConversationLogHasDT(path string) error {
+	messages, err := readConversationLog(path)
+	if err != nil {
+		return err
+	}
+	needsWrite := false
+	for i := range messages {
+		if strings.TrimSpace(messages[i].Dt) == "" {
+			messages[i].Dt = time.Now().UTC().Format(time.RFC3339)
+			needsWrite = true
+		}
+	}
+	if !needsWrite {
+		return nil
+	}
+	return writeConversationLog(path, messages)
 }
 
 type lockedBuffer struct {

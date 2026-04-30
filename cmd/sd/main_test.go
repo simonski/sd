@@ -593,6 +593,9 @@ func TestBuildConversationMessages(t *testing.T) {
 	if got[1].Role != "assistant" || !strings.Contains(strings.ToLower(got[1].Text), "hi") {
 		t.Fatalf("unexpected second message: %+v", got[1])
 	}
+	if strings.TrimSpace(got[0].Dt) == "" || strings.TrimSpace(got[1].Dt) == "" {
+		t.Fatalf("expected dt on all messages, got %+v", got)
+	}
 }
 
 func TestMigrateConversationLogsCreatesSingleJson(t *testing.T) {
@@ -632,5 +635,10 @@ func TestMigrateConversationLogsCreatesSingleJson(t *testing.T) {
 	}
 	if len(messages) == 0 {
 		t.Fatalf("expected migrated conversation messages, got none")
+	}
+	for _, msg := range messages {
+		if strings.TrimSpace(msg.Dt) == "" {
+			t.Fatalf("expected dt on migrated message, got %+v", msg)
+		}
 	}
 }
