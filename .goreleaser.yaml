@@ -37,7 +37,7 @@ brews:
     license: MIT
     repository:
       owner: simonski
-      name: homebrew-tap
+      name: tap
       branch: main
     directory: Formula
     commit_author:
