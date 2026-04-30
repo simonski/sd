@@ -130,7 +130,7 @@ func run(args []string, out io.Writer, errOut io.Writer) (int, error) {
 		printUsage(out)
 		return 0, nil
 	case "version", "--version", "-v":
-		fmt.Fprintf(out, "sd %s\n", version)
+		fmt.Fprintf(out, "%s\n", semanticVersion(version))
 		return 0, nil
 	case "init":
 		return runInit(out)
@@ -183,6 +183,38 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "  sd copilot")
 	fmt.Fprintln(out, "  sd codex")
 	fmt.Fprintln(out, "  sd claude")
+}
+
+func semanticVersion(raw string) string {
+	candidate := strings.TrimSpace(raw)
+	candidate = strings.TrimPrefix(candidate, "v")
+	if candidate == "" {
+		return "0.0.0"
+	}
+	candidate = strings.SplitN(candidate, "-", 2)[0]
+	candidate = strings.SplitN(candidate, "+", 2)[0]
+	if !isStrictCoreSemver(candidate) {
+		return "0.0.0"
+	}
+	return candidate
+}
+
+func isStrictCoreSemver(v string) bool {
+	parts := strings.Split(v, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	for _, part := range parts {
+		if part == "" {
+			return false
+		}
+		for _, ch := range part {
+			if ch < '0' || ch > '9' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func runInit(out io.Writer) (int, error) {

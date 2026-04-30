@@ -9,6 +9,43 @@ import (
 	"time"
 )
 
+func TestSemanticVersion(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{in: "0.0.1", want: "0.0.1"},
+		{in: "v1.2.3", want: "1.2.3"},
+		{in: "v1.2.3-4-gabc123", want: "1.2.3"},
+		{in: "1.2.3+build.7", want: "1.2.3"},
+		{in: "dev", want: "0.0.0"},
+	}
+
+	for _, tc := range tests {
+		if got := semanticVersion(tc.in); got != tc.want {
+			t.Fatalf("semanticVersion(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestRunVersionPrintsSemanticOnly(t *testing.T) {
+	original := version
+	version = "v1.2.3-4-gabc123"
+	t.Cleanup(func() { version = original })
+
+	var out bytes.Buffer
+	code, err := run([]string{"version"}, &out, &out)
+	if err != nil {
+		t.Fatalf("run error: %v", err)
+	}
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d", code)
+	}
+	if got := out.String(); got != "1.2.3\n" {
+		t.Fatalf("expected semantic version only, got %q", got)
+	}
+}
+
 func TestFindRepoRootFromPrefersNearestWorkspace(t *testing.T) {
 	root := t.TempDir()
 	project := filepath.Join(root, "project")

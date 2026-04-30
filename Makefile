@@ -3,7 +3,7 @@
 BINARY := sd
 PKG := ./cmd/sd
 BIN_DIR := bin
-VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+VERSION ?= $(shell (git describe --tags --abbrev=0 2>/dev/null || echo v0.0.0) | sed 's/^v//')
 PUBLISH_TAG ?=
 
 .PHONY: help build install test publish
