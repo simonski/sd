@@ -1,0 +1,52 @@
+version: 2
+
+project_name: sd
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: sd
+    main: ./cmd/sd
+    binary: sd
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+archives:
+  - id: sd-archive
+    formats: [tar.gz]
+    files:
+      - none*
+
+checksum:
+  name_template: checksums.txt
+
+brews:
+  - name: sd
+    homepage: https://github.com/simonski/sd
+    description: Spec-driven wrapper for agentic programming CLIs
+    license: MIT
+    repository:
+      owner: simonski
+      name: homebrew-tap
+      branch: main
+    directory: Formula
+    commit_author:
+      name: sd-release-bot
+      email: 223556219+Copilot@users.noreply.github.com
+    test: |
+      system "#{bin}/sd", "help"
+
+release:
+  github:
+    owner: simonski
+    name: sd
