@@ -52,8 +52,14 @@ sd ls
 sd ls 0
 sd cat 0
 sd history
+sd doctor
 sd spec
 ```
+
+During `sd <agent> ...`, press `Esc`, `` ` ``, or `~` twice quickly to open/focus the spec overlay. While it is open, press any of those keys twice quickly (or `Esc` once) to dismiss and return focus to the agent.
+
+- In **tmux**, this uses a left popup overlay (~2/3 width).
+- In **macOS Terminal** (non-tmux), this uses a native in-terminal overlay renderer.
 
 ## Documentation
 

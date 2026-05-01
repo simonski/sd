@@ -46,6 +46,66 @@ func TestRunVersionPrintsSemanticOnly(t *testing.T) {
 	}
 }
 
+func TestDetectTerminalDoctorInfoMacOSTerminal(t *testing.T) {
+	env := map[string]string{
+		"TERM_PROGRAM": "Apple_Terminal",
+		"TERM":         "xterm-256color",
+	}
+	info := detectTerminalDoctorInfo(func(key string) string { return env[key] })
+	if info.TerminalName != "macOS Terminal" {
+		t.Fatalf("expected macOS Terminal, got %q", info.TerminalName)
+	}
+	if info.InTmux {
+		t.Fatalf("expected not in tmux")
+	}
+	if !info.OverlaySupport {
+		t.Fatalf("expected overlay support true for macOS Terminal")
+	}
+	if !strings.Contains(info.OverlayStatus, "native macOS Terminal overlay") {
+		t.Fatalf("unexpected overlay status: %q", info.OverlayStatus)
+	}
+}
+
+func TestDetectTerminalDoctorInfoTmux(t *testing.T) {
+	env := map[string]string{
+		"TERM_PROGRAM": "Apple_Terminal",
+		"TERM":         "screen-256color",
+		"TMUX":         "/tmp/tmux-501/default,123,0",
+		"TMUX_PANE":    "%5",
+	}
+	info := detectTerminalDoctorInfo(func(key string) string { return env[key] })
+	if info.TerminalName != "tmux" {
+		t.Fatalf("expected tmux, got %q", info.TerminalName)
+	}
+	if !info.InTmux {
+		t.Fatalf("expected in tmux")
+	}
+	if !info.OverlaySupport {
+		t.Fatalf("expected overlay support true in tmux")
+	}
+}
+
+func TestRunDoctorPrintsDiagnostics(t *testing.T) {
+	var out bytes.Buffer
+	code, err := run([]string{"doctor"}, &out, &out)
+	if err != nil {
+		t.Fatalf("run doctor error: %v", err)
+	}
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d", code)
+	}
+	rendered := out.String()
+	if !strings.Contains(rendered, "sd doctor\n") {
+		t.Fatalf("expected doctor header, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "Terminal: ") {
+		t.Fatalf("expected terminal line, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "Panel overlay support: ") {
+		t.Fatalf("expected overlay support line, got %q", rendered)
+	}
+}
+
 func TestFindRepoRootFromPrefersNearestWorkspace(t *testing.T) {
 	root := t.TempDir()
 	project := filepath.Join(root, "project")
@@ -149,6 +209,126 @@ func TestSanitizeOutputLogStripsAnsi(t *testing.T) {
 	}
 	if !strings.Contains(got, "RED") || !strings.Contains(got, "ok") {
 		t.Fatalf("expected printable content retained, got %q", got)
+	}
+}
+
+func TestIsPanelToggleShortcutKey(t *testing.T) {
+	tests := []struct {
+		key  byte
+		want bool
+	}{
+		{key: 0x1b, want: true},
+		{key: '`', want: true},
+		{key: '~', want: true},
+		{key: 'a', want: false},
+		{key: ' ', want: false},
+	}
+	for _, tc := range tests {
+		if got := isPanelToggleShortcutKey(tc.key); got != tc.want {
+			t.Fatalf("isPanelToggleShortcutKey(%q) = %t, want %t", tc.key, got, tc.want)
+		}
+	}
+}
+
+func TestConsumeDoubleShiftSequence(t *testing.T) {
+	tests := []struct {
+		name         string
+		in           []byte
+		wantConsumed int
+		wantMatch    bool
+	}{
+		{
+			name:         "kitty-left-shift",
+			in:           []byte("\x1b[57441;2u"),
+			wantConsumed: len("\x1b[57441;2u"),
+			wantMatch:    true,
+		},
+		{
+			name:         "kitty-right-shift-with-extra-modifier",
+			in:           []byte("\x1b[57447;3u"),
+			wantConsumed: len("\x1b[57447;3u"),
+			wantMatch:    true,
+		},
+		{
+			name:         "not-shift",
+			in:           []byte("\x1b[65;2u"),
+			wantConsumed: 0,
+			wantMatch:    false,
+		},
+		{
+			name:         "non-u-final",
+			in:           []byte("\x1b[57441;2A"),
+			wantConsumed: 0,
+			wantMatch:    false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotConsumed, gotMatch := consumeDoubleShiftSequence(tc.in)
+			if gotConsumed != tc.wantConsumed || gotMatch != tc.wantMatch {
+				t.Fatalf("consumeDoubleShiftSequence(%q) = (%d,%t), want (%d,%t)", string(tc.in), gotConsumed, gotMatch, tc.wantConsumed, tc.wantMatch)
+			}
+		})
+	}
+}
+
+func TestPanelAwareWriterSuppressesDisplayWhenPanelVisible(t *testing.T) {
+	var out bytes.Buffer
+	panel := &specPanelController{panelOpen: true, native: true}
+	writer := &panelAwareWriter{dst: &out, panel: panel}
+
+	n, err := writer.Write([]byte("hello"))
+	if err != nil {
+		t.Fatalf("write returned error: %v", err)
+	}
+	if n != 5 {
+		t.Fatalf("expected write count 5, got %d", n)
+	}
+	if got := out.String(); got != "" {
+		t.Fatalf("expected output to be suppressed, got %q", got)
+	}
+}
+
+func TestPanelAwareWriterForwardsWhenPanelHidden(t *testing.T) {
+	var out bytes.Buffer
+	panel := &specPanelController{}
+	writer := &panelAwareWriter{dst: &out, panel: panel}
+
+	n, err := writer.Write([]byte("hello"))
+	if err != nil {
+		t.Fatalf("write returned error: %v", err)
+	}
+	if n != 5 {
+		t.Fatalf("expected write count 5, got %d", n)
+	}
+	if got := out.String(); got != "hello" {
+		t.Fatalf("expected output to pass through, got %q", got)
+	}
+}
+
+func TestNativeOverlayFrameColumnsSlidesFromLeft(t *testing.T) {
+	cols := nativeOverlayFrameColumns(120, 80)
+	if len(cols) < 2 {
+		t.Fatalf("expected animation columns, got %v", cols)
+	}
+	if cols[0] != 1 {
+		t.Fatalf("expected first column 1, got %d", cols[0])
+	}
+	if cols[len(cols)-1] != 41 {
+		t.Fatalf("expected final column 41, got %d", cols[len(cols)-1])
+	}
+	for i := 1; i < len(cols); i++ {
+		if cols[i] < cols[i-1] {
+			t.Fatalf("expected non-decreasing columns, got %v", cols)
+		}
+	}
+}
+
+func TestNativeOverlayFrameColumnsNoAnimationWhenFullWidth(t *testing.T) {
+	cols := nativeOverlayFrameColumns(80, 80)
+	if len(cols) != 1 || cols[0] != 1 {
+		t.Fatalf("expected single final column, got %v", cols)
 	}
 }
 

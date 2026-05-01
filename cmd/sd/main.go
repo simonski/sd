@@ -54,6 +54,9 @@ const (
 	historyContinuationBlank = "           |"
 	historyDayDivider        = "-----------+------------------------------------------------------------------------"
 	historyTextWrapWidth     = 72
+	doubleEscWindow          = 300 * time.Millisecond
+	nativeOverlayAnimation   = time.Second / 3
+	nativeOverlayFrames      = 12
 )
 
 type config struct {
@@ -154,6 +157,8 @@ func run(args []string, out io.Writer, errOut io.Writer) (int, error) {
 		return runInputs(args[1:], out)
 	case "get":
 		return runGet(args[1:], out)
+	case "doctor":
+		return runDoctor(args[1:], out)
 	default:
 		return runAgent(args[0], args[1:], errOut)
 	}
@@ -177,6 +182,7 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "  inputs    Print user input sequence across sessions")
 	fmt.Fprintln(out, "  history   Alias for `sd inputs`")
 	fmt.Fprintln(out, "  get       Show cleaned input for one session (`sd get N`)")
+	fmt.Fprintln(out, "  doctor    Show terminal/overlay capability diagnostics")
 	fmt.Fprintln(out, "  spec      Assemble .sd/spec.generated.md from state")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Agent wrapper examples:")
@@ -834,6 +840,91 @@ func runGet(args []string, out io.Writer) (int, error) {
 	return 0, nil
 }
 
+type terminalDoctorInfo struct {
+	TerminalName    string
+	TermProgram     string
+	Term            string
+	InTmux          bool
+	TmuxPane        string
+	OverlaySupport  bool
+	OverlayStatus   string
+	SupportNextStep string
+}
+
+func runDoctor(args []string, out io.Writer) (int, error) {
+	if len(args) > 0 {
+		return 1, fmt.Errorf("unknown doctor argument %q", args[0])
+	}
+
+	info := detectTerminalDoctorInfo(os.Getenv)
+	fmt.Fprintln(out, "sd doctor")
+	fmt.Fprintf(out, "Terminal: %s\n", info.TerminalName)
+	if info.TermProgram != "" {
+		fmt.Fprintf(out, "TERM_PROGRAM: %s\n", info.TermProgram)
+	}
+	if info.Term != "" {
+		fmt.Fprintf(out, "TERM: %s\n", info.Term)
+	}
+	fmt.Fprintf(out, "In tmux: %t\n", info.InTmux)
+	if info.TmuxPane != "" {
+		fmt.Fprintf(out, "TMUX_PANE: %s\n", info.TmuxPane)
+	}
+	fmt.Fprintf(out, "Panel overlay support: %s\n", info.OverlayStatus)
+	fmt.Fprintf(out, "Next step: %s\n", info.SupportNextStep)
+	return 0, nil
+}
+
+func detectTerminalDoctorInfo(getenv func(string) string) terminalDoctorInfo {
+	termProgram := strings.TrimSpace(getenv("TERM_PROGRAM"))
+	term := strings.TrimSpace(getenv("TERM"))
+	tmux := strings.TrimSpace(getenv("TMUX"))
+	tmuxPane := strings.TrimSpace(getenv("TMUX_PANE"))
+	inTmux := tmux != "" && tmuxPane != ""
+
+	name := "Unknown terminal"
+	switch {
+	case inTmux:
+		name = "tmux"
+	case termProgram == "Apple_Terminal":
+		name = "macOS Terminal"
+	case termProgram == "iTerm.app":
+		name = "iTerm2"
+	case termProgram == "WezTerm":
+		name = "WezTerm"
+	case termProgram == "vscode":
+		name = "VS Code terminal"
+	case termProgram == "WarpTerminal":
+		name = "Warp"
+	case strings.Contains(strings.ToLower(term), "xterm"):
+		name = "xterm-compatible terminal"
+	}
+
+	info := terminalDoctorInfo{
+		TerminalName: name,
+		TermProgram:  termProgram,
+		Term:         term,
+		InTmux:       inTmux,
+		TmuxPane:     tmuxPane,
+	}
+	if inTmux {
+		info.OverlaySupport = true
+		info.OverlayStatus = "supported (tmux popup overlay)"
+		info.SupportNextStep = "Use double-press shortcuts to open and dismiss panel (Esc also dismisses)."
+		return info
+	}
+	if termProgram == "Apple_Terminal" {
+		info.OverlaySupport = true
+		info.OverlayStatus = "supported (native macOS Terminal overlay)"
+		info.SupportNextStep = "Use double-press shortcuts to open and dismiss panel (Esc also dismisses)."
+		return info
+	}
+
+	info.OverlaySupport = false
+	info.OverlayStatus = "not supported in this terminal yet (current implementation requires tmux)"
+	info.SupportNextStep = "Run inside tmux for panel overlays; native non-tmux support is currently available only in macOS Terminal."
+	return info
+}
+
 func runAgent(command string, args []string, errOut io.Writer) (int, error) {
 	resolvedCommand, err := exec.LookPath(command)
 	if err != nil {
@@ -982,7 +1073,7 @@ func runAgent(command string, args []string, errOut io.Writer) (int, error) {
 		}()
 	}
 
-	exitCode, execErr := runInteractive(cmd, stdinCapture, stdoutCapture)
+	exitCode, execErr := runInteractive(repoRoot, cmd, stdinCapture, stdoutCapture)
 	close(stopSig)
 	signal.Stop(termSignals)
 	<-sigDone
@@ -1014,7 +1105,7 @@ func runAgent(command string, args []string, errOut io.Writer) (int, error) {
 	return exitCode, nil
 }
 
-func runInteractive(cmd *exec.Cmd, stdinLog io.Writer, stdoutLog io.Writer) (int, error) {
+func runInteractive(repoRoot string, cmd *exec.Cmd, stdinLog io.Writer, stdoutLog io.Writer) (int, error) {
 	stdin := os.Stdin
 	stdout := os.Stdout
 	stderr := os.Stderr
@@ -1059,15 +1150,16 @@ func runInteractive(cmd *exec.Cmd, stdinLog io.Writer, stdoutLog io.Writer) (int
 			defer term.Restore(int(stdin.Fd()), oldState)
 		}
 
+		panel := newSpecPanelController(repoRoot, stdout, int(stdout.Fd()))
+		defer panel.forceDismiss()
+		liveWriter := io.Writer(&panelAwareWriter{dst: displayWriter, panel: panel})
+
 		outDone := make(chan error, 1)
 		go func() {
-			_, copyErr := io.Copy(io.MultiWriter(displayWriter, stdoutLog), ptmx)
+			_, copyErr := io.Copy(io.MultiWriter(liveWriter, stdoutLog), ptmx)
 			outDone <- copyErr
 		}()
-
-		go func() {
-			_, _ = io.Copy(ptmx, io.TeeReader(stdin, stdinLog))
-		}()
+		go copyInputWithShortcuts(stdin, ptmx, stdinLog, panel)
 
 		waitErr := cmd.Wait()
 		_ = ptmx.Close()
@@ -1080,6 +1172,491 @@ func runInteractive(cmd *exec.Cmd, stdinLog io.Writer, stdoutLog io.Writer) (int
 	cmd.Stderr = io.MultiWriter(newOSCTerminalFilterWriter(stderr), stdoutLog)
 	waitErr := cmd.Run()
 	return exitCodeFromWait(waitErr), nil
+}
+
+type specPanelController struct {
+	mu        sync.Mutex
+	repoRoot  string
+	agentPane string
+	output    io.Writer
+	stdoutFD  int
+	panelOpen bool
+	native    bool
+}
+
+func newSpecPanelController(repoRoot string, output io.Writer, stdoutFD int) *specPanelController {
+	return &specPanelController{
+		repoRoot:  repoRoot,
+		agentPane: strings.TrimSpace(os.Getenv("TMUX_PANE")),
+		output:    output,
+		stdoutFD:  stdoutFD,
+	}
+}
+
+func (c *specPanelController) available() bool {
+	return c.tmuxAvailable() || c.nativeSupported()
+}
+
+func (c *specPanelController) tmuxAvailable() bool {
+	return strings.TrimSpace(os.Getenv("TMUX")) != "" && c.agentPane != ""
+}
+
+func (c *specPanelController) nativeSupported() bool {
+	return strings.TrimSpace(os.Getenv("TERM_PROGRAM")) == "Apple_Terminal"
+}
+
+func (c *specPanelController) toggleOrFocus() bool {
+	if !c.available() {
+		fmt.Fprintln(os.Stdout, "sd: panel debug: overlay unavailable (no supported terminal backend)")
+		return false
+	}
+	if c.isVisible() {
+		fmt.Fprintln(os.Stdout, "sd: panel debug: overlay already visible")
+		return true
+	}
+	if c.tmuxAvailable() {
+		return c.openTmuxOverlay()
+	}
+	if c.nativeSupported() {
+		return c.openNativeOverlay()
+	}
+	return false
+}
+
+func (c *specPanelController) openTmuxOverlay() bool {
+	panelCmd := "sd spec >/dev/null 2>&1; if [ -f .sd/spec.generated.md ]; then ${PAGER:-less} .sd/spec.generated.md; else printf 'sd: no generated spec yet\\n'; fi; exec ${SHELL:-sh} -i"
+	err := exec.Command(
+		"tmux", "display-popup",
+		"-t", c.agentPane,
+		"-d", c.repoRoot,
+		"-x", "0",
+		"-y", "0",
+		"-w", "66%",
+		"-h", "100%",
+		"-E",
+		"sh", "-lc", panelCmd,
+	).Run()
+	if err != nil {
+		fmt.Fprintf(os.Stdout, "sd: panel debug: display-popup failed: %v\n", err)
+		return false
+	}
+	if !c.popupVisible() {
+		fmt.Fprintln(os.Stdout, "sd: panel debug: popup not visible after display-popup")
+		return false
+	}
+	c.mu.Lock()
+	c.panelOpen = true
+	c.native = false
+	c.mu.Unlock()
+	return true
+}
+
+func (c *specPanelController) openNativeOverlay() bool {
+	c.mu.Lock()
+	c.panelOpen = true
+	c.native = true
+	c.mu.Unlock()
+
+	content := c.loadGeneratedSpec()
+	if err := c.renderNativeOverlay(content); err != nil {
+		fmt.Fprintf(os.Stdout, "sd: panel debug: native overlay render failed: %v\n", err)
+		c.mu.Lock()
+		c.panelOpen = false
+		c.native = false
+		c.mu.Unlock()
+		return false
+	}
+	return true
+}
+
+func (c *specPanelController) dismiss() bool {
+	if !c.isVisible() {
+		return false
+	}
+
+	c.mu.Lock()
+	native := c.native
+	c.mu.Unlock()
+
+	if native {
+		if err := c.closeNativeOverlay(); err != nil {
+			return false
+		}
+		c.mu.Lock()
+		c.panelOpen = false
+		c.native = false
+		c.mu.Unlock()
+		return true
+	}
+	if err := exec.Command("tmux", "display-popup", "-C", "-t", c.agentPane).Run(); err != nil {
+		return false
+	}
+	c.mu.Lock()
+	c.panelOpen = false
+	c.native = false
+	c.mu.Unlock()
+	_ = c.selectPane(c.agentPane)
+	return true
+}
+
+func (c *specPanelController) forceDismiss() {
+	_ = c.dismiss()
+}
+
+func (c *specPanelController) isVisible() bool {
+	c.mu.Lock()
+	panelOpen := c.panelOpen
+	native := c.native
+	c.mu.Unlock()
+	if !panelOpen {
+		return false
+	}
+	if native {
+		return true
+	}
+	if !c.tmuxAvailable() {
+		c.mu.Lock()
+		c.panelOpen = false
+		c.native = false
+		c.mu.Unlock()
+		return false
+	}
+	if c.popupVisible() {
+		return true
+	}
+	c.mu.Lock()
+	c.panelOpen = false
+	c.native = false
+	c.mu.Unlock()
+	return false
+}
+
+func (c *specPanelController) selectPane(id string) bool {
+	if strings.TrimSpace(id) == "" {
+		return false
+	}
+	return exec.Command("tmux", "select-pane", "-t", id).Run() == nil
+}
+
+func (c *specPanelController) popupVisible() bool {
+	if !c.tmuxAvailable() {
+		return false
+	}
+	out, err := exec.Command("tmux", "display-message", "-p", "-t", c.agentPane, "#{popup_visible}").Output()
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(out)) == "1"
+}
+
+func (c *specPanelController) loadGeneratedSpec() string {
+	if err := c.regenerateGeneratedSpec(); err != nil {
+		fmt.Fprintf(os.Stdout, "sd: panel debug: failed to regenerate spec: %v\n", err)
+	}
+	path := filepath.Join(c.repoRoot, stateDirName, "spec.generated.md")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Sprintf("sd: no generated spec available\n\nRun `sd spec` to generate it.\n\nError: %v", err)
+	}
+	return string(raw)
+}
+
+func (c *specPanelController) regenerateGeneratedSpec() error {
+	bin, err := os.Executable()
+	if err != nil {
+		bin = os.Args[0]
+	}
+	cmd := exec.Command(bin, "spec")
+	cmd.Dir = c.repoRoot
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	return cmd.Run()
+}
+
+func (c *specPanelController) renderNativeOverlay(content string) error {
+	width, height, err := c.terminalSize()
+	if err != nil {
+		return err
+	}
+	panelWidth := (width * 2) / 3
+	if panelWidth < 40 {
+		panelWidth = width
+	}
+	if panelWidth > width {
+		panelWidth = width
+	}
+
+	maxBodyLines := height - 4
+	if maxBodyLines < 1 {
+		maxBodyLines = 1
+	}
+	bodyLines := normalizeOverlayLines(content)
+	if len(bodyLines) > maxBodyLines {
+		bodyLines = bodyLines[:maxBodyLines]
+	}
+
+	if _, err := io.WriteString(c.output, "\x1b[?1049h\x1b[?25l"); err != nil {
+		return err
+	}
+
+	columns := nativeOverlayFrameColumns(width, panelWidth)
+	for i, col := range columns {
+		frame := buildNativeOverlayFrame(col, panelWidth, height, maxBodyLines, bodyLines)
+		if _, err := io.WriteString(c.output, frame); err != nil {
+			return err
+		}
+		if i+1 < len(columns) && len(columns) > 1 {
+			time.Sleep(nativeOverlayAnimation / time.Duration(len(columns)-1))
+		}
+	}
+	return nil
+}
+
+func nativeOverlayFrameColumns(termWidth, panelWidth int) []int {
+	end := max(1, termWidth-panelWidth+1)
+	if end == 1 || nativeOverlayFrames <= 1 {
+		return []int{1}
+	}
+	cols := make([]int, 0, nativeOverlayFrames)
+	for i := 0; i < nativeOverlayFrames; i++ {
+		col := 1 + ((end-1)*i)/(nativeOverlayFrames-1)
+		if len(cols) == 0 || cols[len(cols)-1] != col {
+			cols = append(cols, col)
+		}
+	}
+	if cols[len(cols)-1] != end {
+		cols = append(cols, end)
+	}
+	return cols
+}
+
+func buildNativeOverlayFrame(panelCol, panelWidth, height, maxBodyLines int, bodyLines []string) string {
+	var b strings.Builder
+	b.WriteString("\x1b[H\x1b[2J")
+
+	top := "+" + strings.Repeat("-", max(panelWidth-2, 0)) + "+"
+	fmt.Fprintf(&b, "\x1b[1;%dH%s", panelCol, fitOverlayLine(top, panelWidth))
+
+	title := "| sd spec overlay (Esc to close)"
+	fmt.Fprintf(&b, "\x1b[2;%dH%s", panelCol, fitOverlayLine(title, panelWidth))
+
+	for row := 0; row < maxBodyLines; row++ {
+		line := ""
+		if row < len(bodyLines) {
+			line = bodyLines[row]
+		}
+		fmt.Fprintf(&b, "\x1b[%d;%dH%s", row+3, panelCol, fitOverlayLine("| "+line, panelWidth))
+	}
+	bottom := "+" + strings.Repeat("-", max(panelWidth-2, 0)) + "+"
+	fmt.Fprintf(&b, "\x1b[%d;%dH%s", height, panelCol, fitOverlayLine(bottom, panelWidth))
+	return b.String()
+}
+
+func (c *specPanelController) closeNativeOverlay() error {
+	_, err := io.WriteString(c.output, "\x1b[?25h\x1b[?1049l")
+	return err
+}
+
+func (c *specPanelController) terminalSize() (int, int, error) {
+	width, height, err := term.GetSize(c.stdoutFD)
+	if err != nil {
+		return 0, 0, err
+	}
+	if width <= 0 || height <= 0 {
+		return 0, 0, fmt.Errorf("invalid terminal size width=%d height=%d", width, height)
+	}
+	return width, height, nil
+}
+
+func normalizeOverlayLines(content string) []string {
+	rawLines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	lines := make([]string, 0, len(rawLines))
+	for _, line := range rawLines {
+		line = strings.TrimRight(line, " \t\r")
+		line = strings.ReplaceAll(line, "\t", "    ")
+		lines = append(lines, sanitizeOverlayLine(line))
+	}
+	return lines
+}
+
+func sanitizeOverlayLine(line string) string {
+	var b strings.Builder
+	for _, r := range line {
+		if r == '\n' || r == '\r' || r == '\t' {
+			continue
+		}
+		if r < 32 || r == 127 {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+func fitOverlayLine(line string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	if utf8.RuneCountInString(line) > width {
+		if width <= 1 {
+			return line[:1]
+		}
+		return truncateRunes(line, width-1) + ">"
+	}
+	return line + strings.Repeat(" ", width-utf8.RuneCountInString(line))
+}
+
+func truncateRunes(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	var b strings.Builder
+	count := 0
+	for _, r := range s {
+		if count >= n {
+			break
+		}
+		b.WriteRune(r)
+		count++
+	}
+	return b.String()
+}
+
+func copyInputWithShortcuts(stdin *os.File, ptmx *os.File, stdinLog io.Writer, panel *specPanelController) {
+	buf := make([]byte, 1024)
+	pendingShortcut := byte(0)
+	pendingDoubleShift := false
+	pendingAt := time.Time{}
+	clearPendingShortcut := func() {
+		pendingShortcut = 0
+		pendingDoubleShift = false
+		pendingAt = time.Time{}
+	}
+	flushPendingShortcut := func() {
+		if pendingShortcut == 0 && !pendingDoubleShift {
+			return
+		}
+		if pendingShortcut != 0 {
+			_, _ = stdinLog.Write([]byte{pendingShortcut})
+			_, _ = ptmx.Write([]byte{pendingShortcut})
+		}
+		clearPendingShortcut()
+	}
+	for {
+		n, err := stdin.Read(buf)
+		if n > 0 {
+			for i := 0; i < n; i++ {
+				b := buf[i]
+				visible := panel.isVisible()
+
+				if consumed, ok := consumeDoubleShiftSequence(buf[i:n]); ok {
+					now := time.Now()
+					if pendingDoubleShift && !pendingAt.IsZero() && now.Sub(pendingAt) <= doubleEscWindow {
+						if (visible && panel.dismiss()) || (!visible && panel.toggleOrFocus()) {
+							clearPendingShortcut()
+							i += consumed - 1
+							continue
+						}
+					}
+					flushPendingShortcut()
+					pendingDoubleShift = true
+					pendingAt = now
+					i += consumed - 1
+					continue
+				}
+
+				if isPanelToggleShortcutKey(b) {
+					now := time.Now()
+					if pendingShortcut == b && !pendingAt.IsZero() && now.Sub(pendingAt) <= doubleEscWindow {
+						if (visible && panel.dismiss()) || (!visible && panel.toggleOrFocus()) {
+							clearPendingShortcut()
+							continue
+						}
+					}
+					flushPendingShortcut()
+					pendingShortcut = b
+					pendingDoubleShift = false
+					pendingAt = now
+					continue
+				}
+
+				if visible && b == 0x1b && panel.dismiss() {
+					clearPendingShortcut()
+					continue
+				}
+				if visible {
+					clearPendingShortcut()
+					continue
+				}
+
+				flushPendingShortcut()
+				_, _ = stdinLog.Write([]byte{b})
+				_, _ = ptmx.Write([]byte{b})
+			}
+		}
+		if err != nil {
+			flushPendingShortcut()
+			return
+		}
+	}
+}
+
+func consumeDoubleShiftSequence(data []byte) (int, bool) {
+	if len(data) < 4 || data[0] != 0x1b || data[1] != '[' {
+		return 0, false
+	}
+	final := -1
+	for i := 2; i < len(data); i++ {
+		if data[i] >= 0x40 && data[i] <= 0x7e {
+			final = i
+			break
+		}
+	}
+	if final == -1 || data[final] != 'u' {
+		return 0, false
+	}
+	params := strings.TrimSpace(string(data[2:final]))
+	if params == "" {
+		return 0, false
+	}
+	parts := strings.Split(params, ";")
+	if len(parts) < 2 {
+		return 0, false
+	}
+	keyCode, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return 0, false
+	}
+	modifiers, err := strconv.Atoi(parts[1])
+	if err != nil || modifiers < 1 {
+		return 0, false
+	}
+	hasShift := ((modifiers - 1) & 1) == 1 || (modifiers&1) == 1
+	if !hasShift {
+		return 0, false
+	}
+	switch keyCode {
+	case 16, 57441, 57447:
+		return final + 1, true
+	default:
+		return 0, false
+	}
+}
+
+func isPanelToggleShortcutKey(b byte) bool {
+	return b == 0x1b || b == '`' || b == '~'
+}
+
+type panelAwareWriter struct {
+	dst   io.Writer
+	panel *specPanelController
+}
+
+func (w *panelAwareWriter) Write(p []byte) (int, error) {
+	if w.panel != nil && w.panel.isVisible() {
+		return len(p), nil
+	}
+	return w.dst.Write(p)
 }
 
 func exitCodeFromWait(err error) int {

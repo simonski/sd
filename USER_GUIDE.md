@@ -26,11 +26,26 @@ Prints the current CLI version.
 sd version
 ```
 
+### `sd doctor`
+
+Prints terminal diagnostics and whether in-session panel overlay is currently supported.
+
+```bash
+sd doctor
+```
+
 ## Wrapped agent runs
 
 ### `sd <agent-binary> [args...]`
 
 Runs an agent command while capturing session metadata and conversation artifacts.
+
+`sd` supports an in-session spec overlay while the agent is running:
+- Press **Esc twice quickly** to open/focus the overlay and regenerate spec (`sd spec`).
+- While the overlay is open, press **Esc**, **`**, or **~** twice quickly to close it and return to the agent (single **Esc** also closes it).
+- Press **`` ` `` twice quickly** or **`~~` quickly** as alternative open/focus shortcuts.
+- In **tmux**, overlay uses tmux popup behavior (left-side, ~2/3 width).
+- In **macOS Terminal** (outside tmux), overlay uses a native renderer in the current terminal.
 
 Examples:
 
