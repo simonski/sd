@@ -3030,8 +3030,9 @@ func extractInputSequence(raw []byte) []string {
 
 func collectInputHistoryEntries(repoRoot string, interactions []interaction, hidden map[string]struct{}, showAll bool) []inputHistoryEntry {
 	entries := make([]inputHistoryEntry, 0, len(interactions))
+	processedConversationLogs := map[string]struct{}{}
 	for _, item := range interactions {
-		if isSessionMetaEvent(item.EventType) || item.EventType == eventTypeStart {
+		if isSessionMetaEvent(item.EventType) {
 			continue
 		}
 		sessionKey := interactionSessionKey(item)
@@ -3040,27 +3041,65 @@ func collectInputHistoryEntries(repoRoot string, interactions []interaction, hid
 				continue
 			}
 		}
+		eventTS, err := time.Parse(time.RFC3339, item.Timestamp)
+		if err != nil {
+			continue
+		}
 
-		text := strings.TrimSpace(item.InputPreview)
-		if text == "" {
-			if strings.TrimSpace(item.ConversationLog) != "" {
-				if messages, err := readConversationLog(filepath.Join(repoRoot, filepath.FromSlash(item.ConversationLog))); err == nil {
-					text = strings.TrimSpace(buildInputPreviewFromConversation(messages))
+		if item.EventType == eventTypeStart {
+			cmdLine := strings.TrimSpace(strings.Join(append([]string{item.Command}, item.Args...), " "))
+			if cmdLine != "" {
+				entries = append(entries, inputHistoryEntry{
+					Timestamp: eventTS,
+					SessionID: sessionKey,
+					Text:      "$ " + cmdLine,
+				})
+			}
+			continue
+		}
+
+		conversationAdded := false
+		conversationLog := strings.TrimSpace(item.ConversationLog)
+		if conversationLog != "" {
+			if _, seen := processedConversationLogs[conversationLog]; !seen {
+				if messages, readErr := readConversationLog(filepath.Join(repoRoot, filepath.FromSlash(conversationLog))); readErr == nil {
+					for _, msg := range messages {
+						if msg.Role != "user" {
+							continue
+						}
+						text := strings.TrimSpace(msg.Text)
+						if text == "" || strings.HasPrefix(text, "<CTRL-") {
+							continue
+						}
+						msgTS := eventTS
+						if parsed, parseErr := time.Parse(time.RFC3339, strings.TrimSpace(msg.Dt)); parseErr == nil {
+							msgTS = parsed
+						}
+						entries = append(entries, inputHistoryEntry{
+							Timestamp: msgTS,
+							SessionID: sessionKey,
+							Text:      text,
+						})
+						conversationAdded = true
+					}
+					processedConversationLogs[conversationLog] = struct{}{}
 				}
 			}
 		}
+
+		if conversationAdded {
+			continue
+		}
+
+		text := strings.TrimSpace(item.InputPreview)
 		if text == "" {
 			text = strings.TrimSpace(buildInputPreview(repoRoot, item.StdinLog))
 		}
 		if text == "" || strings.HasPrefix(text, "<CTRL-") {
 			continue
 		}
-		ts, err := time.Parse(time.RFC3339, item.Timestamp)
-		if err != nil {
-			continue
-		}
 		entries = append(entries, inputHistoryEntry{
-			Timestamp: ts,
+			Timestamp: eventTS,
 			SessionID: sessionKey,
 			Text:      text,
 		})

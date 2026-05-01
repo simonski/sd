@@ -148,7 +148,7 @@ sd prune
 
 ### `sd inputs` and `sd history`
 
-`history` is an alias of `inputs`. Prints user-side conversation sequence across sessions, grouped by day and ordered by time.
+`history` is an alias of `inputs`. Prints a chronological stream of session launches (`$ <agent> ...`) plus user prompts across sessions, grouped by day and ordered by time.
 
 ```bash
 sd inputs

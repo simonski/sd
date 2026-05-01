@@ -621,6 +621,54 @@ func TestPrintInputHistoryGroupsByDateAndTime(t *testing.T) {
 	}
 }
 
+func TestCollectInputHistoryEntriesIncludesCommandAndConversationUsers(t *testing.T) {
+	repoRoot := t.TempDir()
+	sessionsDir := filepath.Join(repoRoot, ".sd", "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatalf("mkdir sessions: %v", err)
+	}
+	conversationRel := ".sd/sessions/s1.conversation.json"
+	conversationPath := filepath.Join(repoRoot, filepath.FromSlash(conversationRel))
+	conversation := []byte(`[
+  {"dt":"2026-05-01T10:00:01Z","role":"user","text":"first prompt"},
+  {"dt":"2026-05-01T10:00:02Z","role":"assistant","text":"response"},
+  {"dt":"2026-05-01T10:00:03Z","role":"user","text":"second prompt"}
+]`)
+	if err := os.WriteFile(conversationPath, conversation, 0o644); err != nil {
+		t.Fatalf("write conversation: %v", err)
+	}
+
+	interactions := []interaction{
+		{
+			EventType:       eventTypeStart,
+			SessionID:       "s1",
+			Timestamp:       "2026-05-01T10:00:00Z",
+			Command:         "copilot",
+			Args:            []string{"--resume=Plan Next Steps"},
+			ConversationLog: conversationRel,
+		},
+		{
+			EventType:       eventTypeFinal,
+			SessionID:       "s1",
+			Timestamp:       "2026-05-01T10:00:04Z",
+			Command:         "copilot",
+			Args:            []string{"--resume=Plan Next Steps"},
+			ConversationLog: conversationRel,
+		},
+	}
+
+	got := collectInputHistoryEntries(repoRoot, interactions, map[string]struct{}{}, false)
+	if len(got) != 3 {
+		t.Fatalf("expected 3 entries, got %d (%+v)", len(got), got)
+	}
+	if got[0].Text != "$ copilot --resume=Plan Next Steps" {
+		t.Fatalf("unexpected first entry: %+v", got[0])
+	}
+	if got[1].Text != "first prompt" || got[2].Text != "second prompt" {
+		t.Fatalf("unexpected conversation entries: %+v", got)
+	}
+}
+
 func TestWrapWordsNoSplit(t *testing.T) {
 	in := "alpha beta gamma delta epsilon zeta eta theta"
 	lines := wrapWordsNoSplit(in, 14)
