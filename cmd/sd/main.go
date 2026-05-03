@@ -1,8 +1,9 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -57,6 +58,9 @@ const (
 	doubleEscWindow          = 300 * time.Millisecond
 	nativeOverlayAnimation   = time.Second / 3
 	nativeOverlayFrames      = 12
+	stateLockFileName        = ".lock"
+	smallSessionMaxBytes     = 16 * 1024
+	maxBufferedPanelOutput   = 1 << 20
 )
 
 type config struct {
@@ -90,6 +94,20 @@ type hiddenSessions struct {
 	HiddenSessionIDs []string `json:"hidden_session_ids"`
 }
 
+type compactedSessionFile struct {
+	Path       string `json:"path"`
+	SizeBytes  int64  `json:"size_bytes"`
+	SHA256     string `json:"sha256"`
+	ContentB64 string `json:"content_b64"`
+}
+
+type compactedSessions struct {
+	SchemaVersion int                    `json:"schema_version"`
+	GeneratedAt   string                 `json:"generated_at"`
+	MaxBytes      int64                  `json:"max_bytes"`
+	Files         []compactedSessionFile `json:"files"`
+}
+
 type sessionIndex struct {
 	NextID  int            `json:"next_id"`
 	Entries map[string]int `json:"entries"`
@@ -109,8 +127,11 @@ type sessionSummary struct {
 }
 
 type inputHistoryEntry struct {
+	ID        int
 	Timestamp time.Time
 	SessionID string
+	Hidden    bool
+	IsOutput  bool
 	Text      string
 }
 
@@ -173,17 +194,21 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "  help      Show this usage output")
 	fmt.Fprintln(out, "  version   Show sd version")
 	fmt.Fprintln(out, "  init      Create/update .sd workspace in the current repo")
-	fmt.Fprintln(out, "  ls        List sessions, or show abbreviated interactions for one session")
+	fmt.Fprintln(out, "  session   Session subcommands (`sd session ls|history|count|hide|show|rm ...`)")
+	fmt.Fprintln(out, "  ls        List sessions, or show abbreviated interactions for one session (`sd ls N`)")
 	fmt.Fprintln(out, "  cat       Show full logs/details for one session")
 	fmt.Fprintln(out, "  hide      Soft-delete a session from ls/cat")
+	fmt.Fprintln(out, "  show      Restore a hidden session")
 	fmt.Fprintln(out, "  unhide    Restore a hidden session (`sd unhide N` from `sd ls --hidden`)")
 	fmt.Fprintln(out, "  rm        Hard-delete one session (`sd rm N`)")
 	fmt.Fprintln(out, "  prune     Remove hidden sessions and orphan artifacts")
 	fmt.Fprintln(out, "  inputs    Print user input sequence across sessions")
 	fmt.Fprintln(out, "  history   Alias for `sd inputs`")
+	fmt.Fprintln(out, "  count     Count captured interactions")
+	fmt.Fprintln(out, "  checkpoint Manage and apply session checkpoints")
 	fmt.Fprintln(out, "  get       Show cleaned input for one session (`sd get N`)")
 	fmt.Fprintln(out, "  doctor    Show terminal/overlay capability diagnostics")
-	fmt.Fprintln(out, "  spec      Assemble .sd/spec.generated.md from state")
+	fmt.Fprintln(out, "  spec      Assemble generated spec view from .sd/state.db state")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Agent wrapper examples:")
 	fmt.Fprintln(out, "  sd copilot")
@@ -372,14 +397,13 @@ func runSpec(out io.Writer) (int, error) {
 		}
 	}
 
-	generatedPath := filepath.Join(stateDir, "spec.generated.md")
 	generated := b.String()
-	if err := os.WriteFile(generatedPath, []byte(generated), 0o644); err != nil {
+	if err := upsertGeneratedSpecInDB(stateDir, generated); err != nil {
 		return 1, err
 	}
 
 	fmt.Fprintln(out, generated)
-	fmt.Fprintf(out, "Wrote %s\n", generatedPath)
+	fmt.Fprintln(out, "Updated generated spec in .sd/state.db")
 	return 0, nil
 }
 
@@ -752,12 +776,15 @@ func runInputs(args []string, out io.Writer) (int, error) {
 	}
 
 	showAll := false
-	if len(args) > 0 {
-		switch strings.TrimSpace(args[0]) {
+	includeOutput := false
+	for _, rawArg := range args {
+		switch strings.TrimSpace(rawArg) {
 		case "--all", "-a":
 			showAll = true
+		case "--output", "-o":
+			includeOutput = true
 		default:
-			return 1, fmt.Errorf("unknown inputs argument %q", args[0])
+			return 1, fmt.Errorf("unknown inputs argument %q", rawArg)
 		}
 	}
 
@@ -770,7 +797,7 @@ func runInputs(args []string, out io.Writer) (int, error) {
 		return 1, err
 	}
 
-	entries := collectInputHistoryEntries(repoRoot, interactions, hiddenSet, showAll)
+	entries := collectInputHistoryEntries(repoRoot, interactions, hiddenSet, showAll, includeOutput)
 	if len(entries) == 0 {
 		fmt.Fprintln(out, "No captured inputs found.")
 		return 0, nil
@@ -840,91 +867,6 @@ func runGet(args []string, out io.Writer) (int, error) {
 	return 0, nil
 }
 
-type terminalDoctorInfo struct {
-	TerminalName    string
-	TermProgram     string
-	Term            string
-	InTmux          bool
-	TmuxPane        string
-	OverlaySupport  bool
-	OverlayStatus   string
-	SupportNextStep string
-}
-
-func runDoctor(args []string, out io.Writer) (int, error) {
-	if len(args) > 0 {
-		return 1, fmt.Errorf("unknown doctor argument %q", args[0])
-	}
-
-	info := detectTerminalDoctorInfo(os.Getenv)
-	fmt.Fprintln(out, "sd doctor")
-	fmt.Fprintf(out, "Terminal: %s\n", info.TerminalName)
-	if info.TermProgram != "" {
-		fmt.Fprintf(out, "TERM_PROGRAM: %s\n", info.TermProgram)
-	}
-	if info.Term != "" {
-		fmt.Fprintf(out, "TERM: %s\n", info.Term)
-	}
-	fmt.Fprintf(out, "In tmux: %t\n", info.InTmux)
-	if info.TmuxPane != "" {
-		fmt.Fprintf(out, "TMUX_PANE: %s\n", info.TmuxPane)
-	}
-	fmt.Fprintf(out, "Panel overlay support: %s\n", info.OverlayStatus)
-	fmt.Fprintf(out, "Next step: %s\n", info.SupportNextStep)
-	return 0, nil
-}
-
-func detectTerminalDoctorInfo(getenv func(string) string) terminalDoctorInfo {
-	termProgram := strings.TrimSpace(getenv("TERM_PROGRAM"))
-	term := strings.TrimSpace(getenv("TERM"))
-	tmux := strings.TrimSpace(getenv("TMUX"))
-	tmuxPane := strings.TrimSpace(getenv("TMUX_PANE"))
-	inTmux := tmux != "" && tmuxPane != ""
-
-	name := "Unknown terminal"
-	switch {
-	case inTmux:
-		name = "tmux"
-	case termProgram == "Apple_Terminal":
-		name = "macOS Terminal"
-	case termProgram == "iTerm.app":
-		name = "iTerm2"
-	case termProgram == "WezTerm":
-		name = "WezTerm"
-	case termProgram == "vscode":
-		name = "VS Code terminal"
-	case termProgram == "WarpTerminal":
-		name = "Warp"
-	case strings.Contains(strings.ToLower(term), "xterm"):
-		name = "xterm-compatible terminal"
-	}
-
-	info := terminalDoctorInfo{
-		TerminalName: name,
-		TermProgram:  termProgram,
-		Term:         term,
-		InTmux:       inTmux,
-		TmuxPane:     tmuxPane,
-	}
-	if inTmux {
-		info.OverlaySupport = true
-		info.OverlayStatus = "supported (tmux popup overlay)"
-		info.SupportNextStep = "Use double-press shortcuts to open and dismiss panel (Esc also dismisses)."
-		return info
-	}
-	if termProgram == "Apple_Terminal" {
-		info.OverlaySupport = true
-		info.OverlayStatus = "supported (native macOS Terminal overlay)"
-		info.SupportNextStep = "Use double-press shortcuts to open and dismiss panel (Esc also dismisses)."
-		return info
-	}
-
-	info.OverlaySupport = false
-	info.OverlayStatus = "not supported in this terminal yet (current implementation requires tmux)"
-	info.SupportNextStep = "Run inside tmux for panel overlays; native non-tmux support is currently available only in macOS Terminal."
-	return info
-}
-
 func runAgent(command string, args []string, errOut io.Writer) (int, error) {
 	resolvedCommand, err := exec.LookPath(command)
 	if err != nil {
@@ -943,10 +885,6 @@ func runAgent(command string, args []string, errOut io.Writer) (int, error) {
 
 	sessionID := fmt.Sprintf("%s-%s", time.Now().UTC().Format("20060102T150405Z"), sanitizeFileSegment(command))
 	if _, err := ensureSessionNumber(stateDir, sessionID); err != nil {
-		return 1, err
-	}
-	sessionDir := filepath.Join(stateDir, "sessions")
-	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
 		return 1, err
 	}
 	conversationRel := filepath.ToSlash(filepath.Join(stateDirName, "sessions", sessionID+".conversation.json"))
@@ -980,6 +918,8 @@ func runAgent(command string, args []string, errOut io.Writer) (int, error) {
 	}
 
 	appendEvent(eventTypeStart, -1, true, nil, "")
+
+	var conversationLogMu sync.Mutex
 
 	var finalizeMu sync.Mutex
 	finalized := false
@@ -1073,7 +1013,30 @@ func runAgent(command string, args []string, errOut io.Writer) (int, error) {
 		}()
 	}
 
-	exitCode, execErr := runInteractive(repoRoot, cmd, stdinCapture, stdoutCapture)
+	exitCode, execErr := runInteractive(repoRoot, cmd, stdinCapture, stdoutCapture, func(inputLine string) {
+		inputPreview := strings.TrimSpace(inputLine)
+		if inputPreview == "" || strings.HasPrefix(inputPreview, "<CTRL-") {
+			return
+		}
+		appendEvent(eventTypeUpdate, -1, true, nil, inputPreview)
+		conversationLogMu.Lock()
+		appendErr := appendConversationUserMessage(conversationPath, inputPreview)
+		conversationLogMu.Unlock()
+		if appendErr != nil {
+			fmt.Fprintf(errOut, "sd: wrapper warning: failed to persist submitted input: %v\n", appendErr)
+		}
+	}, func(outputLine string) {
+		msg, ok := assistantMessageFromOutputLine(outputLine)
+		if !ok {
+			return
+		}
+		conversationLogMu.Lock()
+		appendErr := appendConversationAssistantMessage(conversationPath, msg)
+		conversationLogMu.Unlock()
+		if appendErr != nil {
+			fmt.Fprintf(errOut, "sd: wrapper warning: failed to persist assistant output line: %v\n", appendErr)
+		}
+	})
 	close(stopSig)
 	signal.Stop(termSignals)
 	<-sigDone
@@ -1096,16 +1059,20 @@ func runAgent(command string, args []string, errOut io.Writer) (int, error) {
 	}
 
 	conversationMessages := buildConversationMessages(stdinCapture.Bytes(), stdoutCapture.Bytes())
-	if writeErr := writeConversationLog(conversationPath, conversationMessages); writeErr != nil {
+	conversationLogMu.Lock()
+	writeErr := writeConversationLog(conversationPath, conversationMessages)
+	conversationLogMu.Unlock()
+	if writeErr != nil {
 		fmt.Fprintf(errOut, "sd: wrapper warning: failed to write conversation log: %v\n", writeErr)
 	}
 	finalPreview := buildInputPreviewFromConversation(conversationMessages)
 	appendEvent(eventTypeFinal, exitCode, false, modified, finalPreview)
+	_ = compactSmallSessionFiles(stateDir, smallSessionMaxBytes)
 
 	return exitCode, nil
 }
 
-func runInteractive(repoRoot string, cmd *exec.Cmd, stdinLog io.Writer, stdoutLog io.Writer) (int, error) {
+func runInteractive(repoRoot string, cmd *exec.Cmd, stdinLog io.Writer, stdoutLog io.Writer, onInputSubmit func(string), onOutputLine func(string)) (int, error) {
 	stdin := os.Stdin
 	stdout := os.Stdout
 	stderr := os.Stderr
@@ -1116,6 +1083,10 @@ func runInteractive(repoRoot string, cmd *exec.Cmd, stdinLog io.Writer, stdoutLo
 	}
 	if stdoutLog == nil {
 		stdoutLog = io.Discard
+	}
+	outputLogWriter := io.Writer(stdoutLog)
+	if onOutputLine != nil {
+		outputLogWriter = &lineSubmitWriter{dst: stdoutLog, onLine: onOutputLine}
 	}
 
 	if term.IsTerminal(int(stdin.Fd())) && term.IsTerminal(int(stdout.Fd())) {
@@ -1152,14 +1123,20 @@ func runInteractive(repoRoot string, cmd *exec.Cmd, stdinLog io.Writer, stdoutLo
 
 		panel := newSpecPanelController(repoRoot, stdout, int(stdout.Fd()))
 		defer panel.forceDismiss()
-		liveWriter := io.Writer(&panelAwareWriter{dst: displayWriter, panel: panel})
+		panelWriter := &panelAwareWriter{dst: displayWriter, panel: panel}
+		panel.mu.Lock()
+		panel.onDismiss = func() {
+			_ = panelWriter.flushBuffered()
+		}
+		panel.mu.Unlock()
+		liveWriter := io.Writer(panelWriter)
 
 		outDone := make(chan error, 1)
 		go func() {
-			_, copyErr := io.Copy(io.MultiWriter(liveWriter, stdoutLog), ptmx)
+			_, copyErr := io.Copy(io.MultiWriter(liveWriter, outputLogWriter), ptmx)
 			outDone <- copyErr
 		}()
-		go copyInputWithShortcuts(stdin, ptmx, stdinLog, panel)
+		go copyInputWithShortcuts(stdin, ptmx, stdinLog, panel, onInputSubmit)
 
 		waitErr := cmd.Wait()
 		_ = ptmx.Close()
@@ -1168,10 +1145,40 @@ func runInteractive(repoRoot string, cmd *exec.Cmd, stdinLog io.Writer, stdoutLo
 	}
 
 	cmd.Stdin = io.TeeReader(stdin, stdinLog)
-	cmd.Stdout = io.MultiWriter(displayWriter, stdoutLog)
-	cmd.Stderr = io.MultiWriter(newOSCTerminalFilterWriter(stderr), stdoutLog)
+	cmd.Stdout = io.MultiWriter(displayWriter, outputLogWriter)
+	cmd.Stderr = io.MultiWriter(newOSCTerminalFilterWriter(stderr), outputLogWriter)
 	waitErr := cmd.Run()
 	return exitCodeFromWait(waitErr), nil
+}
+
+type lineSubmitWriter struct {
+	dst    io.Writer
+	onLine func(string)
+	buf    bytes.Buffer
+}
+
+func (w *lineSubmitWriter) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if _, err := w.dst.Write(p); err != nil {
+		return 0, err
+	}
+	if w.onLine == nil {
+		return len(p), nil
+	}
+	for _, b := range p {
+		if b == '\n' {
+			line := strings.TrimRight(w.buf.String(), "\r")
+			w.buf.Reset()
+			if strings.TrimSpace(line) != "" {
+				w.onLine(line)
+			}
+			continue
+		}
+		_ = w.buf.WriteByte(b)
+	}
+	return len(p), nil
 }
 
 type specPanelController struct {
@@ -1182,6 +1189,7 @@ type specPanelController struct {
 	stdoutFD  int
 	panelOpen bool
 	native    bool
+	onDismiss func()
 }
 
 func newSpecPanelController(repoRoot string, output io.Writer, stdoutFD int) *specPanelController {
@@ -1224,7 +1232,7 @@ func (c *specPanelController) toggleOrFocus() bool {
 }
 
 func (c *specPanelController) openTmuxOverlay() bool {
-	panelCmd := "sd spec >/dev/null 2>&1; if [ -f .sd/spec.generated.md ]; then ${PAGER:-less} .sd/spec.generated.md; else printf 'sd: no generated spec yet\\n'; fi; exec ${SHELL:-sh} -i"
+	panelCmd := "sd spec 2>/dev/null | ${PAGER:-less}; exec ${SHELL:-sh} -i"
 	err := exec.Command(
 		"tmux", "display-popup",
 		"-t", c.agentPane,
@@ -1283,18 +1291,26 @@ func (c *specPanelController) dismiss() bool {
 			return false
 		}
 		c.mu.Lock()
+		onDismiss := c.onDismiss
 		c.panelOpen = false
 		c.native = false
 		c.mu.Unlock()
+		if onDismiss != nil {
+			onDismiss()
+		}
 		return true
 	}
 	if err := exec.Command("tmux", "display-popup", "-C", "-t", c.agentPane).Run(); err != nil {
 		return false
 	}
 	c.mu.Lock()
+	onDismiss := c.onDismiss
 	c.panelOpen = false
 	c.native = false
 	c.mu.Unlock()
+	if onDismiss != nil {
+		onDismiss()
+	}
 	_ = c.selectPane(c.agentPane)
 	return true
 }
@@ -1350,15 +1366,18 @@ func (c *specPanelController) popupVisible() bool {
 }
 
 func (c *specPanelController) loadGeneratedSpec() string {
+	_, stateDir, err := ensureState(c.repoRoot)
+	if err != nil {
+		return fmt.Sprintf("sd: failed to initialize state: %v", err)
+	}
 	if err := c.regenerateGeneratedSpec(); err != nil {
 		fmt.Fprintf(os.Stdout, "sd: panel debug: failed to regenerate spec: %v\n", err)
 	}
-	path := filepath.Join(c.repoRoot, stateDirName, "spec.generated.md")
-	raw, err := os.ReadFile(path)
+	raw, err := readGeneratedSpecFromDB(stateDir)
 	if err != nil {
 		return fmt.Sprintf("sd: no generated spec available\n\nRun `sd spec` to generate it.\n\nError: %v", err)
 	}
-	return string(raw)
+	return raw
 }
 
 func (c *specPanelController) regenerateGeneratedSpec() error {
@@ -1522,8 +1541,33 @@ func truncateRunes(s string, n int) string {
 	return b.String()
 }
 
-func copyInputWithShortcuts(stdin *os.File, ptmx *os.File, stdinLog io.Writer, panel *specPanelController) {
+func copyInputWithShortcuts(stdin *os.File, ptmx *os.File, stdinLog io.Writer, panel *specPanelController, onInputSubmit func(string)) {
 	buf := make([]byte, 1024)
+	carry := make([]byte, 0, 64)
+	typedLine := make([]byte, 0, 256)
+	recordByte := func(b byte) {
+		switch b {
+		case 0x7f, 0x08: // backspace
+			if len(typedLine) > 0 {
+				typedLine = typedLine[:len(typedLine)-1]
+			}
+		case '\r', '\n':
+			submitted := strings.TrimSpace(string(typedLine))
+			if submitted != "" && onInputSubmit != nil {
+				onInputSubmit(submitted)
+			}
+			typedLine = typedLine[:0]
+		default:
+			if b >= 32 && b != 127 {
+				typedLine = append(typedLine, b)
+			}
+		}
+	}
+	forwardByte := func(b byte) {
+		_, _ = stdinLog.Write([]byte{b})
+		_, _ = ptmx.Write([]byte{b})
+		recordByte(b)
+	}
 	pendingShortcut := byte(0)
 	pendingDoubleShift := false
 	pendingAt := time.Time{}
@@ -1537,19 +1581,20 @@ func copyInputWithShortcuts(stdin *os.File, ptmx *os.File, stdinLog io.Writer, p
 			return
 		}
 		if pendingShortcut != 0 {
-			_, _ = stdinLog.Write([]byte{pendingShortcut})
-			_, _ = ptmx.Write([]byte{pendingShortcut})
+			forwardByte(pendingShortcut)
 		}
 		clearPendingShortcut()
 	}
 	for {
 		n, err := stdin.Read(buf)
 		if n > 0 {
-			for i := 0; i < n; i++ {
-				b := buf[i]
+			chunk := append(carry, buf[:n]...)
+			carry = carry[:0]
+			for i := 0; i < len(chunk); i++ {
+				b := chunk[i]
 				visible := panel.isVisible()
 
-				if consumed, ok := consumeDoubleShiftSequence(buf[i:n]); ok {
+				if consumed, ok := consumeDoubleShiftSequence(chunk[i:]); ok {
 					now := time.Now()
 					if pendingDoubleShift && !pendingAt.IsZero() && now.Sub(pendingAt) <= doubleEscWindow {
 						if (visible && panel.dismiss()) || (!visible && panel.toggleOrFocus()) {
@@ -1563,6 +1608,18 @@ func copyInputWithShortcuts(stdin *os.File, ptmx *os.File, stdinLog io.Writer, p
 					pendingAt = now
 					i += consumed - 1
 					continue
+				}
+
+				if consumed, needMore := consumeEscapeSequence(chunk[i:]); consumed > 0 {
+					flushPendingShortcut()
+					seq := chunk[i : i+consumed]
+					_, _ = stdinLog.Write(seq)
+					_, _ = ptmx.Write(seq)
+					i += consumed - 1
+					continue
+				} else if needMore {
+					carry = append(carry, chunk[i:]...)
+					break
 				}
 
 				if isPanelToggleShortcutKey(b) {
@@ -1590,11 +1647,15 @@ func copyInputWithShortcuts(stdin *os.File, ptmx *os.File, stdinLog io.Writer, p
 				}
 
 				flushPendingShortcut()
-				_, _ = stdinLog.Write([]byte{b})
-				_, _ = ptmx.Write([]byte{b})
+				forwardByte(b)
 			}
 		}
 		if err != nil {
+			if len(carry) > 0 {
+				flushPendingShortcut()
+				_, _ = stdinLog.Write(carry)
+				_, _ = ptmx.Write(carry)
+			}
 			flushPendingShortcut()
 			return
 		}
@@ -1631,7 +1692,7 @@ func consumeDoubleShiftSequence(data []byte) (int, bool) {
 	if err != nil || modifiers < 1 {
 		return 0, false
 	}
-	hasShift := ((modifiers - 1) & 1) == 1 || (modifiers&1) == 1
+	hasShift := ((modifiers-1)&1) == 1 || (modifiers&1) == 1
 	if !hasShift {
 		return 0, false
 	}
@@ -1647,16 +1708,69 @@ func isPanelToggleShortcutKey(b byte) bool {
 	return b == 0x1b || b == '`' || b == '~'
 }
 
+func consumeEscapeSequence(data []byte) (consumed int, needMore bool) {
+	if len(data) < 2 || data[0] != 0x1b {
+		return 0, false
+	}
+	switch data[1] {
+	case '[':
+		for i := 2; i < len(data); i++ {
+			if data[i] >= 0x40 && data[i] <= 0x7e {
+				return i + 1, false
+			}
+		}
+		return 0, true
+	case 'O':
+		if len(data) < 3 {
+			return 0, true
+		}
+		return 3, false
+	default:
+		return 0, false
+	}
+}
+
 type panelAwareWriter struct {
 	dst   io.Writer
 	panel *specPanelController
+	mu    sync.Mutex
+	buf   bytes.Buffer
 }
 
 func (w *panelAwareWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	if w.panel != nil && w.panel.isVisible() {
+		space := maxBufferedPanelOutput - w.buf.Len()
+		if space > 0 {
+			if len(p) <= space {
+				_, _ = w.buf.Write(p)
+			} else {
+				_, _ = w.buf.Write(p[:space])
+			}
+		}
 		return len(p), nil
 	}
+	if w.buf.Len() > 0 {
+		if _, err := w.dst.Write(w.buf.Bytes()); err != nil {
+			return 0, err
+		}
+		w.buf.Reset()
+	}
 	return w.dst.Write(p)
+}
+
+func (w *panelAwareWriter) flushBuffered() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.buf.Len() == 0 {
+		return nil
+	}
+	if _, err := w.dst.Write(w.buf.Bytes()); err != nil {
+		return err
+	}
+	w.buf.Reset()
+	return nil
 }
 
 func exitCodeFromWait(err error) int {
@@ -1672,26 +1786,27 @@ func exitCodeFromWait(err error) int {
 
 func ensureState(repoRoot string) (config, string, error) {
 	stateDir := filepath.Join(repoRoot, stateDirName)
-	sessionDir := filepath.Join(stateDir, "sessions")
-	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		return config{}, "", err
+	}
+	if _, err := openStateDB(stateDir); err != nil {
+		return config{}, "", err
+	}
+	if err := migrateLegacyStateFiles(repoRoot, stateDir); err != nil {
 		return config{}, "", err
 	}
 
-	cfgPath := filepath.Join(stateDir, "config.json")
 	cfg := config{
 		Version:      1,
 		SpecPointers: collectSpecPointers(repoRoot),
 	}
 
-	if existingCfgBytes, err := os.ReadFile(cfgPath); err == nil {
-		var existing config
-		if json.Unmarshal(existingCfgBytes, &existing) == nil {
-			if existing.Version > 0 {
-				cfg.Version = existing.Version
-			}
-			if len(existing.SpecPointers) > 0 {
-				cfg.SpecPointers = dedupeSorted(existing.SpecPointers)
-			}
+	if existing, ok, err := readConfigFromDB(stateDir); err == nil && ok {
+		if existing.Version > 0 {
+			cfg.Version = existing.Version
+		}
+		if len(existing.SpecPointers) > 0 {
+			cfg.SpecPointers = dedupeSorted(existing.SpecPointers)
 		}
 	}
 
@@ -1699,28 +1814,18 @@ func ensureState(repoRoot string) (config, string, error) {
 		cfg.SpecPointers = []string{"SPEC.md"}
 	}
 
-	cfgBytes, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return config{}, "", err
-	}
-	if err := os.WriteFile(cfgPath, cfgBytes, 0o644); err != nil {
+	if err := writeConfigToDB(stateDir, cfg); err != nil {
 		return config{}, "", err
 	}
 
-	interactionsPath := filepath.Join(stateDir, "interactions.ndjson")
-	if _, err := os.Stat(interactionsPath); errors.Is(err, fs.ErrNotExist) {
-		if err := os.WriteFile(interactionsPath, []byte(""), 0o644); err != nil {
-			return config{}, "", err
-		}
-	}
-	interactions, err := readInteractionTimeline(interactionsPath)
+	interactions, err := readInteractionTimeline(filepath.Join(stateDir, "interactions.ndjson"))
 	if err != nil {
 		return config{}, "", err
 	}
 	if _, err := retrofitSessionIndex(stateDir, interactions); err != nil {
 		return config{}, "", err
 	}
-	if err := migrateConversationLogs(repoRoot, interactionsPath, interactions); err != nil {
+	if err := migrateConversationLogs(repoRoot, filepath.Join(stateDir, "interactions.ndjson"), interactions); err != nil {
 		return config{}, "", err
 	}
 
@@ -1776,59 +1881,29 @@ func dedupeSorted(items []string) []string {
 }
 
 func appendInteraction(path string, item interaction) error {
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	raw, err := json.Marshal(item)
-	if err != nil {
-		return err
-	}
-	if _, err := f.Write(append(raw, '\n')); err != nil {
-		return err
-	}
-	return nil
+	stateDir := resolveStateDirForPath(path)
+	return appendInteractionToDB(stateDir, item)
 }
 
 func readInteractionTimeline(path string) ([]interaction, error) {
-	file, err := os.Open(path)
+	stateDir := resolveStateDirForPath(path)
+	items, err := readInteractionsFromDB(stateDir)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil, nil
-		}
 		return nil, err
 	}
-	defer file.Close()
-
-	var out []interaction
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-		var item interaction
-		if err := json.Unmarshal([]byte(line), &item); err != nil {
-			continue
-		}
-		if item.SchemaVersion == 0 {
-			item.SchemaVersion = 1
-		}
-		if strings.TrimSpace(item.EventType) == "" {
-			if item.InProgress || item.ExitCode < 0 {
-				item.EventType = eventTypeUpdate
-			} else {
-				item.EventType = eventTypeFinal
-			}
-		}
-		out = append(out, item)
+	if len(items) > 0 {
+		return items, nil
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, err
+	legacyItems, legacyErr := readInteractionTimelineFile(path)
+	if legacyErr != nil {
+		return nil, legacyErr
 	}
-	return out, nil
+	if len(legacyItems) > 0 {
+		if writeErr := replaceInteractionsInDB(stateDir, legacyItems); writeErr != nil {
+			return nil, writeErr
+		}
+	}
+	return legacyItems, nil
 }
 
 func readInteractions(path string) ([]interaction, error) {
@@ -2133,54 +2208,12 @@ func styleSessionListLine(line string, hidden bool, options lsOptions) string {
 	return line
 }
 
-func hiddenSessionsPath(stateDir string) string {
-	return filepath.Join(stateDir, "sessions.hidden.json")
-}
-
-func sessionIndexPath(stateDir string) string {
-	return filepath.Join(stateDir, "session_index.json")
-}
-
 func readSessionIndex(stateDir string) (sessionIndex, error) {
-	path := sessionIndexPath(stateDir)
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return sessionIndex{Entries: map[string]int{}}, nil
-		}
-		return sessionIndex{}, err
-	}
-	var idx sessionIndex
-	if err := json.Unmarshal(raw, &idx); err != nil {
-		return sessionIndex{}, err
-	}
-	if idx.Entries == nil {
-		idx.Entries = map[string]int{}
-	}
-	max := -1
-	for _, n := range idx.Entries {
-		if n > max {
-			max = n
-		}
-	}
-	if idx.NextID <= max {
-		idx.NextID = max + 1
-	}
-	if idx.NextID < 0 {
-		idx.NextID = 0
-	}
-	return idx, nil
+	return readSessionIndexFromDB(stateDir)
 }
 
 func writeSessionIndex(stateDir string, idx sessionIndex) error {
-	if idx.Entries == nil {
-		idx.Entries = map[string]int{}
-	}
-	raw, err := json.MarshalIndent(idx, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(sessionIndexPath(stateDir), raw, 0o644)
+	return writeSessionIndexToDB(stateDir, idx)
 }
 
 func retrofitSessionIndex(stateDir string, interactions []interaction) (map[string]int, error) {
@@ -2227,45 +2260,11 @@ func ensureSessionNumber(stateDir, sessionKey string) (int, error) {
 }
 
 func readHiddenSessionIDs(stateDir string) (map[string]struct{}, error) {
-	path := hiddenSessionsPath(stateDir)
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return map[string]struct{}{}, nil
-		}
-		return nil, err
-	}
-	var payload hiddenSessions
-	if err := json.Unmarshal(raw, &payload); err != nil {
-		return nil, err
-	}
-	set := make(map[string]struct{}, len(payload.HiddenSessionIDs))
-	for _, sessionID := range payload.HiddenSessionIDs {
-		sessionID = strings.TrimSpace(sessionID)
-		if sessionID == "" {
-			continue
-		}
-		set[sessionID] = struct{}{}
-	}
-	return set, nil
+	return readHiddenSessionsFromDB(stateDir)
 }
 
 func writeHiddenSessionIDs(stateDir string, hidden map[string]struct{}) error {
-	ids := make([]string, 0, len(hidden))
-	for sessionID := range hidden {
-		sessionID = strings.TrimSpace(sessionID)
-		if sessionID == "" {
-			continue
-		}
-		ids = append(ids, sessionID)
-	}
-	sort.Strings(ids)
-	payload := hiddenSessions{HiddenSessionIDs: ids}
-	raw, err := json.MarshalIndent(payload, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(hiddenSessionsPath(stateDir), raw, 0o644)
+	return writeHiddenSessionsToDB(stateDir, hidden)
 }
 
 func conversationLogRelForInteraction(item interaction) string {
@@ -2292,39 +2291,27 @@ func migrateConversationLogs(repoRoot, interactionsPath string, interactions []i
 		return nil
 	}
 	changed := false
-	created := map[string]struct{}{}
 	for idx := range interactions {
 		if isSessionMetaEvent(interactions[idx].EventType) {
 			continue
 		}
 		rel := conversationLogRelForInteraction(interactions[idx])
-		interactions[idx].ConversationLog = rel
+		if interactions[idx].ConversationLog != rel {
+			interactions[idx].ConversationLog = rel
+			changed = true
+		}
 		oldStdin := strings.TrimSpace(interactions[idx].StdinLog)
 		oldStdout := strings.TrimSpace(interactions[idx].StdoutLog)
-		interactions[idx].StdinLog = ""
-		interactions[idx].StdoutLog = ""
-		abs := filepath.Join(repoRoot, filepath.FromSlash(rel))
-		if _, ok := created[rel]; ok {
-			changed = true
-			if oldStdin != "" {
-				_ = os.Remove(filepath.Join(repoRoot, filepath.FromSlash(oldStdin)))
-			}
-			if oldStdout != "" {
-				_ = os.Remove(filepath.Join(repoRoot, filepath.FromSlash(oldStdout)))
-			}
-			continue
+		stateDirForLog, conversationKey, err := conversationLogKeyFromPath(filepath.Join(repoRoot, filepath.FromSlash(rel)))
+		if err != nil {
+			return err
 		}
-		if _, err := os.Stat(abs); err == nil {
-			if err := ensureConversationLogHasDT(abs); err != nil {
-				return err
-			}
-			created[rel] = struct{}{}
-			changed = true
-			if oldStdin != "" {
-				_ = os.Remove(filepath.Join(repoRoot, filepath.FromSlash(oldStdin)))
-			}
-			if oldStdout != "" {
-				_ = os.Remove(filepath.Join(repoRoot, filepath.FromSlash(oldStdout)))
+		existingMessages, readErr := readConversationLogFromDB(stateDirForLog, conversationKey)
+		if readErr == nil && len(existingMessages) > 0 {
+			if oldStdin != "" || oldStdout != "" {
+				interactions[idx].StdinLog = ""
+				interactions[idx].StdoutLog = ""
+				changed = true
 			}
 			continue
 		}
@@ -2340,19 +2327,14 @@ func migrateConversationLogs(repoRoot, interactionsPath string, interactions []i
 				stdoutRaw = raw
 			}
 		}
-		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
-			return err
+		messages := buildConversationMessages(stdinRaw, stdoutRaw)
+		if err := writeConversationLogToDB(stateDirForLog, conversationKey, messages); err != nil {
+			if !errors.Is(err, fs.ErrNotExist) {
+				return err
+			}
 		}
-		if err := writeConversationLog(abs, buildConversationMessages(stdinRaw, stdoutRaw)); err != nil {
-			return err
-		}
-		if oldStdin != "" {
-			_ = os.Remove(filepath.Join(repoRoot, filepath.FromSlash(oldStdin)))
-		}
-		if oldStdout != "" {
-			_ = os.Remove(filepath.Join(repoRoot, filepath.FromSlash(oldStdout)))
-		}
-		created[rel] = struct{}{}
+		interactions[idx].StdinLog = ""
+		interactions[idx].StdoutLog = ""
 		changed = true
 	}
 	if changed {
@@ -2362,21 +2344,59 @@ func migrateConversationLogs(repoRoot, interactionsPath string, interactions []i
 }
 
 func writeInteractionTimeline(path string, interactions []interaction) error {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	stateDir := resolveStateDirForPath(path)
+	return replaceInteractionsInDB(stateDir, interactions)
+}
+
+func compactSmallSessionFiles(stateDir string, maxBytes int64) error {
+	if strings.TrimSpace(stateDir) == "" || maxBytes <= 0 {
+		return nil
+	}
+	interactions, err := readInteractionsFromDB(stateDir)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	seen := map[string]struct{}{}
+	files := make([]compactedSessionFile, 0, len(interactions))
 	for _, item := range interactions {
-		raw, err := json.Marshal(item)
+		conversationLog := strings.TrimSpace(item.ConversationLog)
+		if conversationLog == "" {
+			continue
+		}
+		if _, exists := seen[conversationLog]; exists {
+			continue
+		}
+		seen[conversationLog] = struct{}{}
+		msgs, err := readConversationLog(filepath.Join(filepath.Dir(stateDir), filepath.FromSlash(conversationLog)))
+		if err != nil {
+			continue
+		}
+		raw, err := json.Marshal(msgs)
 		if err != nil {
 			return err
 		}
-		if _, err := f.Write(append(raw, '\n')); err != nil {
-			return err
+		size := int64(len(raw))
+		if size <= 0 || size > maxBytes {
+			continue
 		}
+		sum := sha256.Sum256(raw)
+		files = append(files, compactedSessionFile{
+			Path:       conversationLog,
+			SizeBytes:  size,
+			SHA256:     fmt.Sprintf("%x", sum),
+			ContentB64: base64.StdEncoding.EncodeToString(raw),
+		})
 	}
-	return nil
+	sort.SliceStable(files, func(i, j int) bool {
+		return files[i].Path < files[j].Path
+	})
+	payload := compactedSessions{
+		SchemaVersion: 1,
+		GeneratedAt:   time.Now().UTC().Format(time.RFC3339),
+		MaxBytes:      maxBytes,
+		Files:         files,
+	}
+	return writeCompactBundleToDB(stateDir, payload)
 }
 
 func hardDeleteSession(repoRoot, stateDir, sessionKey string, interactions []interaction, hidden map[string]struct{}) (int, int, error) {
@@ -2390,12 +2410,6 @@ func hardDeleteSession(repoRoot, stateDir, sessionKey string, interactions []int
 			if strings.TrimSpace(item.ConversationLog) != "" {
 				logsToDelete[item.ConversationLog] = struct{}{}
 			}
-			if strings.TrimSpace(item.StdinLog) != "" {
-				logsToDelete[item.StdinLog] = struct{}{}
-			}
-			if strings.TrimSpace(item.StdoutLog) != "" {
-				logsToDelete[item.StdoutLog] = struct{}{}
-			}
 			continue
 		}
 		keep = append(keep, item)
@@ -2408,83 +2422,32 @@ func hardDeleteSession(repoRoot, stateDir, sessionKey string, interactions []int
 		return 0, 0, err
 	}
 
-	referencedLogs := map[string]struct{}{}
+	referencedConversations := map[string]struct{}{}
 	for _, item := range keep {
 		if item.ConversationLog != "" {
-			referencedLogs[item.ConversationLog] = struct{}{}
-		}
-		if item.StdinLog != "" {
-			referencedLogs[item.StdinLog] = struct{}{}
-		}
-		if item.StdoutLog != "" {
-			referencedLogs[item.StdoutLog] = struct{}{}
+			referencedConversations[item.ConversationLog] = struct{}{}
 		}
 	}
 
 	removedFiles := 0
 	for rel := range logsToDelete {
-		if _, stillReferenced := referencedLogs[rel]; stillReferenced {
+		if _, stillReferenced := referencedConversations[rel]; stillReferenced {
 			continue
 		}
-		path := filepath.Join(repoRoot, filepath.FromSlash(rel))
-		if err := os.Remove(path); err == nil {
-			removedFiles++
-		} else if !errors.Is(err, fs.ErrNotExist) {
+		stateDirForLog, key, err := conversationLogKeyFromPath(filepath.Join(repoRoot, filepath.FromSlash(rel)))
+		if err != nil {
+			continue
+		}
+		if err := writeConversationLogToDB(stateDirForLog, key, []conversationMessage{}); err != nil {
 			return 0, 0, err
 		}
+		removedFiles++
 	}
 	return removedInteractions, removedFiles, nil
 }
 
 func removeOrphanSessionLogs(repoRoot, stateDir string, interactions []interaction) (int, error) {
-	referenced := map[string]struct{}{}
-	for _, item := range interactions {
-		if strings.TrimSpace(item.ConversationLog) != "" {
-			referenced[item.ConversationLog] = struct{}{}
-		}
-		if strings.TrimSpace(item.StdinLog) != "" {
-			referenced[item.StdinLog] = struct{}{}
-		}
-		if strings.TrimSpace(item.StdoutLog) != "" {
-			referenced[item.StdoutLog] = struct{}{}
-		}
-	}
-	sessionDir := filepath.Join(stateDir, "sessions")
-	entries, err := os.ReadDir(sessionDir)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return 0, nil
-		}
-		return 0, err
-	}
-	removed := 0
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		rel := filepath.ToSlash(filepath.Join(stateDirName, "sessions", entry.Name()))
-		if _, ok := referenced[rel]; ok {
-			continue
-		}
-		path := filepath.Join(sessionDir, entry.Name())
-		if err := os.Remove(path); err == nil {
-			removed++
-		} else if !errors.Is(err, fs.ErrNotExist) {
-			return 0, err
-		}
-	}
-	// Remove empty nested directories created by legacy paths.
-	_ = filepath.WalkDir(sessionDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || !d.IsDir() || path == sessionDir {
-			return nil
-		}
-		childEntries, readErr := os.ReadDir(path)
-		if readErr == nil && len(childEntries) == 0 {
-			_ = os.Remove(path)
-		}
-		return nil
-	})
-	return removed, nil
+	return 0, nil
 }
 
 func printSessionAbbreviated(out io.Writer, repoRoot string, summary sessionSummary, events []interaction) error {
@@ -2850,49 +2813,37 @@ func extractDialog(input, output string) []string {
 	}
 
 	for _, line := range strings.Split(output, "\n") {
-		text := strings.TrimSpace(line)
-		if !strings.HasPrefix(text, "● ") {
-			continue
+		if msg, ok := assistantMessageFromOutputLine(line); ok {
+			lines = append(lines, "Assistant: "+msg)
 		}
-		msg := strings.TrimSpace(strings.TrimPrefix(text, "● "))
-		if msg == "" {
-			continue
-		}
-		lower := strings.ToLower(msg)
-		if strings.Contains(lower, "loading environment") ||
-			strings.Contains(lower, "environment loaded") ||
-			strings.Contains(lower, "thinking") ||
-			strings.Contains(lower, "ctrl+c again to exit") ||
-			strings.Contains(lower, "no copilot instructions found") {
-			continue
-		}
-		lines = append(lines, "Assistant: "+msg)
 	}
 
 	return lines
 }
 
+func assistantMessageFromOutputLine(line string) (string, bool) {
+	text := strings.TrimSpace(line)
+	if !strings.HasPrefix(text, "● ") {
+		return "", false
+	}
+	msg := strings.TrimSpace(strings.TrimPrefix(text, "● "))
+	if msg == "" {
+		return "", false
+	}
+	lower := strings.ToLower(msg)
+	if strings.Contains(lower, "loading environment") ||
+		strings.Contains(lower, "environment loaded") ||
+		strings.Contains(lower, "thinking") ||
+		strings.Contains(lower, "ctrl+c again to exit") ||
+		strings.Contains(lower, "no copilot instructions found") {
+		return "", false
+	}
+	return msg, true
+}
+
 func buildInputPreview(repoRoot, stdinRel string) string {
-	stdinRel = strings.TrimSpace(stdinRel)
-	if stdinRel == "" {
-		return ""
-	}
-	stdinRaw, err := os.ReadFile(filepath.Join(repoRoot, filepath.FromSlash(stdinRel)))
-	if err != nil {
-		return ""
-	}
-	cleaned := sanitizeInputLog(stdinRaw)
-	lines := strings.Split(cleaned, "\n")
-	for i := len(lines) - 1; i >= 0; i-- {
-		line := strings.TrimSpace(lines[i])
-		if line == "" {
-			continue
-		}
-		if strings.HasPrefix(line, "<CTRL-") {
-			continue
-		}
-		return line
-	}
+	_ = repoRoot
+	_ = stdinRel
 	return ""
 }
 
@@ -2955,23 +2906,70 @@ func writeConversationLog(path string, messages []conversationMessage) error {
 			messages[i].Dt = time.Now().UTC().Format(time.RFC3339)
 		}
 	}
-	raw, err := json.MarshalIndent(messages, "", "  ")
+	stateDir, key, err := conversationLogKeyFromPath(path)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, raw, 0o644)
+	return writeConversationLogToDB(stateDir, key, messages)
+}
+
+func appendConversationUserMessage(path, text string) error {
+	return appendConversationMessage(path, "user", text)
+}
+
+func appendConversationAssistantMessage(path, text string) error {
+	return appendConversationMessage(path, "assistant", text)
+}
+
+func appendConversationMessage(path, role, text string) error {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return nil
+	}
+	role = strings.TrimSpace(role)
+	if role == "" {
+		return nil
+	}
+	existing := []conversationMessage{}
+	messages, err := readConversationLog(path)
+	if err == nil {
+		existing = messages
+	} else if !errors.Is(err, fs.ErrNotExist) && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	existing = append(existing, conversationMessage{
+		Dt:   time.Now().UTC().Format(time.RFC3339),
+		Role: role,
+		Text: text,
+	})
+	return writeConversationLog(path, existing)
 }
 
 func readConversationLog(path string) ([]conversationMessage, error) {
-	raw, err := os.ReadFile(path)
+	stateDir, key, err := conversationLogKeyFromPath(path)
 	if err != nil {
 		return nil, err
 	}
-	var messages []conversationMessage
-	if err := json.Unmarshal(raw, &messages); err != nil {
+	msgs, err := readConversationLogFromDB(stateDir, key)
+	if err != nil {
 		return nil, err
 	}
-	return messages, nil
+	if len(msgs) > 0 {
+		return msgs, nil
+	}
+	legacyMsgs, legacyErr := readConversationLogFile(path)
+	if legacyErr != nil {
+		if errors.Is(legacyErr, fs.ErrNotExist) || errors.Is(legacyErr, os.ErrNotExist) {
+			return []conversationMessage{}, nil
+		}
+		return nil, legacyErr
+	}
+	if len(legacyMsgs) > 0 {
+		if writeErr := writeConversationLogToDB(stateDir, key, legacyMsgs); writeErr != nil {
+			return nil, writeErr
+		}
+	}
+	return legacyMsgs, nil
 }
 
 func ensureConversationLogHasDT(path string) error {
@@ -3028,7 +3026,7 @@ func extractInputSequence(raw []byte) []string {
 	return out
 }
 
-func collectInputHistoryEntries(repoRoot string, interactions []interaction, hidden map[string]struct{}, showAll bool) []inputHistoryEntry {
+func collectInputHistoryEntries(repoRoot string, interactions []interaction, hidden map[string]struct{}, showAll bool, includeOutput bool) []inputHistoryEntry {
 	entries := make([]inputHistoryEntry, 0, len(interactions))
 	processedConversationLogs := map[string]struct{}{}
 	for _, item := range interactions {
@@ -3064,12 +3062,17 @@ func collectInputHistoryEntries(repoRoot string, interactions []interaction, hid
 			if _, seen := processedConversationLogs[conversationLog]; !seen {
 				if messages, readErr := readConversationLog(filepath.Join(repoRoot, filepath.FromSlash(conversationLog))); readErr == nil {
 					for _, msg := range messages {
-						if msg.Role != "user" {
+						role := strings.TrimSpace(msg.Role)
+						if role != "user" && !(includeOutput && role == "assistant") {
 							continue
 						}
 						text := strings.TrimSpace(msg.Text)
 						if text == "" || strings.HasPrefix(text, "<CTRL-") {
 							continue
+						}
+						isOutput := role == "assistant"
+						if isOutput {
+							text = "< " + text
 						}
 						msgTS := eventTS
 						if parsed, parseErr := time.Parse(time.RFC3339, strings.TrimSpace(msg.Dt)); parseErr == nil {
@@ -3078,6 +3081,7 @@ func collectInputHistoryEntries(repoRoot string, interactions []interaction, hid
 						entries = append(entries, inputHistoryEntry{
 							Timestamp: msgTS,
 							SessionID: sessionKey,
+							IsOutput:  isOutput,
 							Text:      text,
 						})
 						conversationAdded = true
@@ -3101,6 +3105,7 @@ func collectInputHistoryEntries(repoRoot string, interactions []interaction, hid
 		entries = append(entries, inputHistoryEntry{
 			Timestamp: eventTS,
 			SessionID: sessionKey,
+			IsOutput:  false,
 			Text:      text,
 		})
 	}
@@ -3116,7 +3121,7 @@ func collectInputHistoryEntries(repoRoot string, interactions []interaction, hid
 			continue
 		}
 		prev := deduped[len(deduped)-1]
-		if prev.SessionID == entry.SessionID && prev.Text == entry.Text {
+		if prev.SessionID == entry.SessionID && prev.IsOutput == entry.IsOutput && prev.Text == entry.Text {
 			continue
 		}
 		deduped = append(deduped, entry)
@@ -3127,7 +3132,8 @@ func collectInputHistoryEntries(repoRoot string, interactions []interaction, hid
 func printInputHistory(out io.Writer, entries []inputHistoryEntry) {
 	currentDate := ""
 	for idx, entry := range entries {
-		date := entry.Timestamp.Format("2006-01-02")
+		localTS := entry.Timestamp.Local()
+		date := localTS.Format("2006-01-02")
 		if date != currentDate {
 			fmt.Fprintf(out, "%s%s%s\n", historyDayColorStart, date, historyColorReset)
 			currentDate = date
@@ -3137,14 +3143,18 @@ func printInputHistory(out io.Writer, entries []inputHistoryEntry) {
 		for lineIdx, line := range wrapped {
 			prefix := historyContinuation
 			if lineIdx == 0 {
-				prefix = fmt.Sprintf("  %s | ", entry.Timestamp.Format("15:04:05"))
+				if entry.IsOutput {
+					prefix = fmt.Sprintf("   %s | ", localTS.Format("15:04:05"))
+				} else {
+					prefix = fmt.Sprintf("  %s | ", localTS.Format("15:04:05"))
+				}
 			}
 			fmt.Fprintf(out, "%s%s\n", prefix, line)
 		}
 
 		if idx < len(entries)-1 {
 			fmt.Fprintln(out, historyContinuationBlank)
-			nextDate := entries[idx+1].Timestamp.Format("2006-01-02")
+			nextDate := entries[idx+1].Timestamp.Local().Format("2006-01-02")
 			if nextDate != date {
 				fmt.Fprintln(out, historyDayDivider)
 			}
@@ -3310,6 +3320,12 @@ func filterIncrementalFiles(files []string) []string {
 			continue
 		}
 		if path == filepath.ToSlash(stateDirName+"/interactions.ndjson") {
+			continue
+		}
+		if path == filepath.ToSlash(stateDirName+"/state.db") {
+			continue
+		}
+		if path == filepath.ToSlash(stateDirName+"/state.db-wal") || path == filepath.ToSlash(stateDirName+"/state.db-shm") {
 			continue
 		}
 		if strings.HasPrefix(path, filepath.ToSlash(stateDirName+"/sessions/")) {
