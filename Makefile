@@ -3,29 +3,60 @@
 BINARY := sd
 PKG := ./cmd/sd
 BIN_DIR := bin
-VERSION ?= $(shell (git describe --tags --abbrev=0 2>/dev/null || echo v0.0.0) | sed 's/^v//')
+VERSION_FILE := VERSION
+VERSION ?= $(shell (cat $(VERSION_FILE) 2>/dev/null || git describe --tags --abbrev=0 2>/dev/null || echo v0.0.0) | sed 's/^v//')
 PUBLISH_TAG ?=
 
-.PHONY: help build install test publish
+.PHONY: help build install test cover vet bench bench-check ci publish bump-version
 
 help:
 	@echo "Usage: make <target>"
 	@echo ""
 	@echo "Targets:"
-	@echo "  build    Build $(BINARY) into $(BIN_DIR)/"
+	@echo "  build    Increment patch version in $(VERSION_FILE) and build $(BINARY) into $(BIN_DIR)/"
 	@echo "  install  Install $(BINARY) to GOBIN using go install"
 	@echo "  test     Run Go tests"
+	@echo "  cover    Run Go tests with coverage"
+	@echo "  vet      Run go vet"
+	@echo "  bench    Run benchmark suite"
+	@echo "  bench-check  Run benchmark threshold checks"
+	@echo "  ci       Run local CI-equivalent checks"
 	@echo "  publish  Create/push release tag, publish GitHub release + Homebrew formula"
 
-build:
+bump-version:
+	@current=$$(cat $(VERSION_FILE) 2>/dev/null || echo 0.0.0); \
+	major=$${current%%.*}; rest=$${current#*.}; minor=$${rest%%.*}; patch=$${rest#*.}; \
+	case "$$major.$$minor.$$patch" in \
+		''|*[^0-9.]*|*.*.*.*) echo "Invalid version in $(VERSION_FILE): $$current"; exit 1 ;; \
+	esac; \
+	next="$$major.$$minor.$$((patch+1))"; \
+	printf '%s\n' "$$next" > $(VERSION_FILE); \
+	echo "Version: $$current -> $$next"
+
+build: bump-version
 	@mkdir -p $(BIN_DIR)
-	@go build -ldflags "-X main.version=$(VERSION)" -o $(BIN_DIR)/$(BINARY) $(PKG)
+	@VERSION=$$(cat $(VERSION_FILE)); go build -ldflags "-X main.version=$$VERSION" -o $(BIN_DIR)/$(BINARY) $(PKG)
 
 install:
-	@go install -ldflags "-X main.version=$(VERSION)" $(PKG)
+	@VERSION=$$(cat $(VERSION_FILE) 2>/dev/null || echo $(VERSION)); go install -ldflags "-X main.version=$$VERSION" $(PKG)
 
 test:
 	@go test ./...
+
+cover:
+	@go test -cover ./...
+
+vet:
+	@go vet ./...
+
+bench:
+	@go test ./cmd/sd -run ^$$ -bench Benchmark -benchmem
+
+bench-check:
+	@./scripts/check-bench.sh
+
+ci: test cover vet bench-check
+	@echo "ci checks complete"
 
 publish:
 	@command -v goreleaser >/dev/null 2>&1 || (echo "goreleaser is required for publish"; exit 1)

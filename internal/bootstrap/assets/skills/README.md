@@ -10,3 +10,4 @@ Suggested initial files:
 - `spec-amendment.md`
 - `adversarial-testing.md`
 - `compliance-checks.md`
+- `sd/SKILL.md`

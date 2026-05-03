@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test-and-quality:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Test
+        run: make test
+
+      - name: Coverage
+        run: make cover
+
+      - name: Vet
+        run: make vet
+
+      - name: Benchmark threshold checks
+        run: |
+          chmod +x scripts/check-bench.sh
+          make bench-check
+
+      - name: Vulnerability scan
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+      - name: GoReleaser config check
+        run: go run github.com/goreleaser/goreleaser/v2@latest check

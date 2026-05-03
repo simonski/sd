@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "binary": "sd",
+  "commands": [
+    {"name": "init", "kind": "builtin"},
+    {"name": "session", "kind": "builtin"},
+    {"name": "hide", "kind": "builtin"},
+    {"name": "show", "kind": "builtin"},
+    {"name": "unhide", "kind": "alias", "alias_of": "show"},
+    {"name": "rm", "kind": "alias", "alias_of": "session rm"},
+    {"name": "history", "kind": "builtin"},
+    {"name": "ls", "kind": "alias", "alias_of": "history"},
+    {"name": "count", "kind": "builtin"},
+    {"name": "checkpoint", "kind": "builtin"},
+    {"name": "doctor", "kind": "builtin"},
+    {"name": "spec", "kind": "builtin"},
+    {"name": "help", "kind": "builtin"},
+    {"name": "version", "kind": "builtin"}
+  ],
+  "removed_commands": [
+    {"name": "cat", "replacement": "history / session history"},
+    {"name": "prune", "replacement": "none"},
+    {"name": "inputs", "replacement": "history"},
+    {"name": "get", "replacement": "history / session history"}
+  ],
+  "range_forms": {
+    "history": ["N-M", "N M", "-from X -to Y"],
+    "hide": ["N-M", "N M", "N"],
+    "show": ["N-M", "N M", "N"]
+  }
+}

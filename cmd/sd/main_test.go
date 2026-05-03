@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,6 +27,66 @@ func TestSemanticVersion(t *testing.T) {
 		if got := semanticVersion(tc.in); got != tc.want {
 			t.Fatalf("semanticVersion(%q) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+func TestCompactSmallSessionFilesCollectsWithoutDeletingOriginals(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), ".sd")
+	sessionsDir := filepath.Join(stateDir, "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatalf("mkdir sessions: %v", err)
+	}
+	smallA := []byte(`[{"dt":"2026-05-03T06:00:00Z","role":"user","text":"hello"}]`)
+	smallB := []byte(`[]`)
+	large := bytes.Repeat([]byte("x"), 2048)
+	if err := os.WriteFile(filepath.Join(sessionsDir, "a.conversation.json"), smallA, 0o644); err != nil {
+		t.Fatalf("write small a: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sessionsDir, "b.conversation.json"), smallB, 0o644); err != nil {
+		t.Fatalf("write small b: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sessionsDir, "large.conversation.json"), large, 0o644); err != nil {
+		t.Fatalf("write large: %v", err)
+	}
+	if err := writeInteractionTimeline(filepath.Join(stateDir, "interactions.ndjson"), []interaction{
+		{SessionID: "a", Timestamp: "2026-05-03T06:00:00Z", Command: "copilot", ConversationLog: ".sd/sessions/a.conversation.json"},
+		{SessionID: "b", Timestamp: "2026-05-03T06:00:01Z", Command: "copilot", ConversationLog: ".sd/sessions/b.conversation.json"},
+		{SessionID: "c", Timestamp: "2026-05-03T06:00:02Z", Command: "copilot", ConversationLog: ".sd/sessions/large.conversation.json"},
+	}); err != nil {
+		t.Fatalf("write interactions: %v", err)
+	}
+
+	if err := compactSmallSessionFiles(stateDir, 1024); err != nil {
+		t.Fatalf("compactSmallSessionFiles error: %v", err)
+	}
+
+	bundle, err := readCompactBundleFromDB(stateDir)
+	if err != nil {
+		t.Fatalf("read compact bundle from db: %v", err)
+	}
+	if len(bundle.Files) != 2 {
+		t.Fatalf("expected 2 compacted entries, got %d", len(bundle.Files))
+	}
+
+	gotByPath := map[string][]byte{}
+	for _, file := range bundle.Files {
+		decoded, decodeErr := base64.StdEncoding.DecodeString(file.ContentB64)
+		if decodeErr != nil {
+			t.Fatalf("decode compacted content for %s: %v", file.Path, decodeErr)
+		}
+		gotByPath[file.Path] = decoded
+	}
+	if got := gotByPath[".sd/sessions/a.conversation.json"]; string(got) != string(smallA) {
+		t.Fatalf("unexpected compacted content for a: %q", string(got))
+	}
+	if got := gotByPath[".sd/sessions/b.conversation.json"]; string(got) != string(smallB) {
+		t.Fatalf("unexpected compacted content for b: %q", string(got))
+	}
+	if _, ok := gotByPath[".sd/sessions/large.conversation.json"]; ok {
+		t.Fatalf("did not expect large file to be compacted")
+	}
+	if _, err := os.Stat(filepath.Join(sessionsDir, "a.conversation.json")); err != nil {
+		t.Fatalf("expected original file to remain: %v", err)
 	}
 }
 
@@ -307,6 +369,99 @@ func TestPanelAwareWriterForwardsWhenPanelHidden(t *testing.T) {
 	}
 }
 
+func TestPanelAwareWriterReplaysBufferedOutputAfterDismiss(t *testing.T) {
+	var out bytes.Buffer
+	panel := &specPanelController{panelOpen: true, native: true}
+	writer := &panelAwareWriter{dst: &out, panel: panel}
+
+	if _, err := writer.Write([]byte("suppressed")); err != nil {
+		t.Fatalf("write while visible returned error: %v", err)
+	}
+	if got := out.String(); got != "" {
+		t.Fatalf("expected suppressed output hidden while panel visible, got %q", got)
+	}
+
+	panel.panelOpen = false
+	panel.native = false
+	if _, err := writer.Write([]byte(" live")); err != nil {
+		t.Fatalf("write after dismiss returned error: %v", err)
+	}
+	if got := out.String(); got != "suppressed live" {
+		t.Fatalf("expected buffered output replayed then live output, got %q", got)
+	}
+}
+
+func TestPanelAwareWriterFlushBufferedOutputWithoutNewWrite(t *testing.T) {
+	var out bytes.Buffer
+	panel := &specPanelController{panelOpen: true, native: true}
+	writer := &panelAwareWriter{dst: &out, panel: panel}
+
+	if _, err := writer.Write([]byte("suppressed")); err != nil {
+		t.Fatalf("write while visible returned error: %v", err)
+	}
+	if got := out.String(); got != "" {
+		t.Fatalf("expected suppressed output hidden while panel visible, got %q", got)
+	}
+
+	panel.panelOpen = false
+	panel.native = false
+	if err := writer.flushBuffered(); err != nil {
+		t.Fatalf("flushBuffered returned error: %v", err)
+	}
+	if got := out.String(); got != "suppressed" {
+		t.Fatalf("expected buffered output replayed after explicit flush, got %q", got)
+	}
+}
+
+func TestConsumeEscapeSequence(t *testing.T) {
+	tests := []struct {
+		name         string
+		in           []byte
+		wantConsumed int
+		wantNeedMore bool
+	}{
+		{
+			name:         "csi complete",
+			in:           []byte("\x1b[A"),
+			wantConsumed: 3,
+			wantNeedMore: false,
+		},
+		{
+			name:         "ss3 complete",
+			in:           []byte("\x1bOP"),
+			wantConsumed: 3,
+			wantNeedMore: false,
+		},
+		{
+			name:         "csi partial",
+			in:           []byte("\x1b[12"),
+			wantConsumed: 0,
+			wantNeedMore: true,
+		},
+		{
+			name:         "single esc",
+			in:           []byte{0x1b},
+			wantConsumed: 0,
+			wantNeedMore: false,
+		},
+		{
+			name:         "not escape sequence",
+			in:           []byte("\x1bx"),
+			wantConsumed: 0,
+			wantNeedMore: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotConsumed, gotNeedMore := consumeEscapeSequence(tc.in)
+			if gotConsumed != tc.wantConsumed || gotNeedMore != tc.wantNeedMore {
+				t.Fatalf("consumeEscapeSequence(%q) = (%d,%t), want (%d,%t)", string(tc.in), gotConsumed, gotNeedMore, tc.wantConsumed, tc.wantNeedMore)
+			}
+		})
+	}
+}
+
 func TestNativeOverlayFrameColumnsSlidesFromLeft(t *testing.T) {
 	cols := nativeOverlayFrameColumns(120, 80)
 	if len(cols) < 2 {
@@ -332,6 +487,56 @@ func TestNativeOverlayFrameColumnsNoAnimationWhenFullWidth(t *testing.T) {
 	}
 }
 
+func TestCopyInputWithShortcutsCallsSubmitOnEnter(t *testing.T) {
+	stdinR, stdinW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("stdin pipe: %v", err)
+	}
+	defer stdinR.Close()
+	defer stdinW.Close()
+
+	ptmxR, ptmxW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("ptmx pipe: %v", err)
+	}
+	defer ptmxR.Close()
+	defer ptmxW.Close()
+
+	var stdinLog bytes.Buffer
+	submitted := make(chan string, 1)
+	done := make(chan struct{})
+	go func() {
+		copyInputWithShortcuts(stdinR, ptmxW, &stdinLog, &specPanelController{}, func(line string) {
+			submitted <- line
+		})
+		close(done)
+	}()
+
+	if _, err := stdinW.Write([]byte("hello there\r")); err != nil {
+		t.Fatalf("write stdin: %v", err)
+	}
+	_ = stdinW.Close()
+	<-done
+	_ = ptmxW.Close()
+
+	select {
+	case got := <-submitted:
+		if got != "hello there" {
+			t.Fatalf("unexpected submitted line: %q", got)
+		}
+	default:
+		t.Fatalf("expected submitted line callback on enter")
+	}
+
+	forwarded, err := io.ReadAll(ptmxR)
+	if err != nil {
+		t.Fatalf("read ptmx: %v", err)
+	}
+	if string(forwarded) != "hello there\r" {
+		t.Fatalf("unexpected forwarded input: %q", string(forwarded))
+	}
+}
+
 func TestExtractDialog(t *testing.T) {
 	input := "hello?\n<CTRL-C>\n"
 	output := "● Loading environment: 3 skills\n● Hey! I’m here and ready to help.\n"
@@ -344,6 +549,44 @@ func TestExtractDialog(t *testing.T) {
 	}
 	if !strings.Contains(got[1], "Assistant: Hey!") {
 		t.Fatalf("unexpected assistant line: %q", got[1])
+	}
+}
+
+func TestAssistantMessageFromOutputLine(t *testing.T) {
+	if msg, ok := assistantMessageFromOutputLine("● Hello there"); !ok || msg != "Hello there" {
+		t.Fatalf("expected assistant message, got ok=%t msg=%q", ok, msg)
+	}
+	if _, ok := assistantMessageFromOutputLine("● Loading environment: 3 skills"); ok {
+		t.Fatalf("expected loading line to be filtered")
+	}
+	if _, ok := assistantMessageFromOutputLine("plain output"); ok {
+		t.Fatalf("expected non-assistant line to be ignored")
+	}
+}
+
+func TestLineSubmitWriterEmitsOnlyOnNewline(t *testing.T) {
+	var dst bytes.Buffer
+	var lines []string
+	w := &lineSubmitWriter{
+		dst: &dst,
+		onLine: func(line string) {
+			lines = append(lines, line)
+		},
+	}
+	if _, err := w.Write([]byte("● Hel")); err != nil {
+		t.Fatalf("write chunk 1: %v", err)
+	}
+	if len(lines) != 0 {
+		t.Fatalf("expected no emitted lines before newline, got %v", lines)
+	}
+	if _, err := w.Write([]byte("lo\n● World\r\n")); err != nil {
+		t.Fatalf("write chunk 2: %v", err)
+	}
+	if got := dst.String(); got != "● Hello\n● World\r\n" {
+		t.Fatalf("unexpected dst content: %q", got)
+	}
+	if len(lines) != 2 || lines[0] != "● Hello" || lines[1] != "● World" {
+		t.Fatalf("unexpected emitted lines: %v", lines)
 	}
 }
 
@@ -540,16 +783,15 @@ func TestHardDeleteSessionRemovesEventsAndLogs(t *testing.T) {
 		t.Fatalf("mkdir sessions: %v", err)
 	}
 	interactionsPath := filepath.Join(stateDir, "interactions.ndjson")
-	stdinRel := ".sd/sessions/s1.stdin.log"
-	stdoutRel := ".sd/sessions/s1.stdout.log"
-	if err := os.WriteFile(filepath.Join(repo, stdinRel), []byte("in"), 0o644); err != nil {
-		t.Fatalf("write stdin: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(repo, stdoutRel), []byte("out"), 0o644); err != nil {
-		t.Fatalf("write stdout: %v", err)
+	conversationRel := ".sd/sessions/s1.conversation.json"
+	if err := writeConversationLog(filepath.Join(repo, filepath.FromSlash(conversationRel)), []conversationMessage{
+		{Dt: "2026-04-30T10:00:00Z", Role: "user", Text: "in"},
+		{Dt: "2026-04-30T10:00:01Z", Role: "assistant", Text: "out"},
+	}); err != nil {
+		t.Fatalf("write conversation: %v", err)
 	}
 	timeline := []interaction{
-		{SessionID: "s1", Timestamp: "2026-04-30T10:00:00Z", Command: "copilot", EventType: eventTypeFinal, StdinLog: stdinRel, StdoutLog: stdoutRel},
+		{SessionID: "s1", Timestamp: "2026-04-30T10:00:00Z", Command: "copilot", EventType: eventTypeFinal, ConversationLog: conversationRel},
 		{SessionID: "s2", Timestamp: "2026-04-30T10:01:00Z", Command: "copilot", EventType: eventTypeFinal},
 	}
 	if err := writeInteractionTimeline(interactionsPath, timeline); err != nil {
@@ -564,7 +806,7 @@ func TestHardDeleteSessionRemovesEventsAndLogs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("hardDeleteSession error: %v", err)
 	}
-	if removedInteractions != 1 || removedFiles != 2 {
+	if removedInteractions != 1 || removedFiles != 1 {
 		t.Fatalf("unexpected removal counts: interactions=%d files=%d", removedInteractions, removedFiles)
 	}
 
@@ -575,8 +817,12 @@ func TestHardDeleteSessionRemovesEventsAndLogs(t *testing.T) {
 	if len(got) != 1 || got[0].SessionID != "s2" {
 		t.Fatalf("expected only s2 interaction remaining, got %+v", got)
 	}
-	if _, err := os.Stat(filepath.Join(repo, stdinRel)); !os.IsNotExist(err) {
-		t.Fatalf("expected stdin log removed, stat err=%v", err)
+	gotMessages, err := readConversationLog(filepath.Join(repo, filepath.FromSlash(conversationRel)))
+	if err != nil {
+		t.Fatalf("readConversationLog: %v", err)
+	}
+	if len(gotMessages) != 0 {
+		t.Fatalf("expected conversation log cleared, got %+v", gotMessages)
 	}
 }
 
@@ -607,10 +853,17 @@ func TestPrintInputHistoryGroupsByDateAndTime(t *testing.T) {
 	var out bytes.Buffer
 	printInputHistory(&out, entries)
 	rendered := out.String()
-	if !strings.Contains(rendered, historyDayColorStart+"2026-04-30"+historyColorReset) || !strings.Contains(rendered, historyDayColorStart+"2026-05-01"+historyColorReset) {
+
+	firstDate := entries[0].Timestamp.Local().Format("2006-01-02")
+	thirdDate := entries[2].Timestamp.Local().Format("2006-01-02")
+	if !strings.Contains(rendered, historyDayColorStart+firstDate+historyColorReset) || !strings.Contains(rendered, historyDayColorStart+thirdDate+historyColorReset) {
 		t.Fatalf("expected date group headers, got %q", rendered)
 	}
-	if !strings.Contains(rendered, "10:00:00 | first input line") || !strings.Contains(rendered, "11:00:00 | second") || !strings.Contains(rendered, "09:30:00 | third") {
+
+	firstTime := entries[0].Timestamp.Local().Format("15:04:05")
+	secondTime := entries[1].Timestamp.Local().Format("15:04:05")
+	thirdTime := entries[2].Timestamp.Local().Format("15:04:05")
+	if !strings.Contains(rendered, firstTime+" | first input line") || !strings.Contains(rendered, secondTime+" | second") || !strings.Contains(rendered, thirdTime+" | third") {
 		t.Fatalf("expected time+text rows, got %q", rendered)
 	}
 	if !strings.Contains(rendered, historyContinuationBlank) {
@@ -657,7 +910,7 @@ func TestCollectInputHistoryEntriesIncludesCommandAndConversationUsers(t *testin
 		},
 	}
 
-	got := collectInputHistoryEntries(repoRoot, interactions, map[string]struct{}{}, false)
+	got := collectInputHistoryEntries(repoRoot, interactions, map[string]struct{}{}, false, false)
 	if len(got) != 3 {
 		t.Fatalf("expected 3 entries, got %d (%+v)", len(got), got)
 	}
@@ -666,6 +919,42 @@ func TestCollectInputHistoryEntriesIncludesCommandAndConversationUsers(t *testin
 	}
 	if got[1].Text != "first prompt" || got[2].Text != "second prompt" {
 		t.Fatalf("unexpected conversation entries: %+v", got)
+	}
+}
+
+func TestCollectInputHistoryEntriesIncludesAssistantOutputWhenEnabled(t *testing.T) {
+	repoRoot := t.TempDir()
+	sessionsDir := filepath.Join(repoRoot, ".sd", "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatalf("mkdir sessions: %v", err)
+	}
+	conversationRel := ".sd/sessions/s1.conversation.json"
+	conversationPath := filepath.Join(repoRoot, filepath.FromSlash(conversationRel))
+	conversation := []byte(`[
+  {"dt":"2026-05-01T10:00:01Z","role":"user","text":"first prompt"},
+  {"dt":"2026-05-01T10:00:02Z","role":"assistant","text":"first response"},
+  {"dt":"2026-05-01T10:00:03Z","role":"user","text":"second prompt"}
+]`)
+	if err := os.WriteFile(conversationPath, conversation, 0o644); err != nil {
+		t.Fatalf("write conversation: %v", err)
+	}
+
+	interactions := []interaction{
+		{
+			EventType:       eventTypeFinal,
+			SessionID:       "s1",
+			Timestamp:       "2026-05-01T10:00:04Z",
+			Command:         "copilot",
+			ConversationLog: conversationRel,
+		},
+	}
+
+	got := collectInputHistoryEntries(repoRoot, interactions, map[string]struct{}{}, false, true)
+	if len(got) != 3 {
+		t.Fatalf("expected 3 entries, got %d (%+v)", len(got), got)
+	}
+	if got[1].Text != "< first response" || !got[1].IsOutput {
+		t.Fatalf("expected assistant response entry, got %+v", got[1])
 	}
 }
 
@@ -783,6 +1072,64 @@ func TestRunHistoryAliasesInputs(t *testing.T) {
 	}
 }
 
+func TestRunHistoryIncludesOutputWithFlag(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir .git: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(repo, ".sd", "sessions"), 0o755); err != nil {
+		t.Fatalf("mkdir sessions: %v", err)
+	}
+	conversationRel := ".sd/sessions/s1.conversation.json"
+	conversation := []byte(`[
+  {"dt":"2026-05-01T10:00:01Z","role":"user","text":"first prompt"},
+  {"dt":"2026-05-01T10:00:02Z","role":"assistant","text":"first response"}
+]`)
+	if err := os.WriteFile(filepath.Join(repo, filepath.FromSlash(conversationRel)), conversation, 0o644); err != nil {
+		t.Fatalf("write conversation: %v", err)
+	}
+	raw := `{"session_id":"s1","timestamp":"2026-05-01T10:00:03Z","command":"copilot","args":[],"event_type":"final","exit_code":0,"conversation_log":".sd/sessions/s1.conversation.json"}` + "\n"
+	if err := os.WriteFile(filepath.Join(repo, ".sd", "interactions.ndjson"), []byte(raw), 0o644); err != nil {
+		t.Fatalf("write interactions: %v", err)
+	}
+
+	prevWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	defer os.Chdir(prevWD)
+	if err := os.Chdir(repo); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	var out bytes.Buffer
+	code, err := run([]string{"history", "-o"}, &out, &out)
+	if err != nil {
+		t.Fatalf("run history error: %v", err)
+	}
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d", code)
+	}
+	rendered := out.String()
+
+	userTS, err := time.Parse(time.RFC3339, "2026-05-01T10:00:01Z")
+	if err != nil {
+		t.Fatalf("parse user dt: %v", err)
+	}
+	assistantTS, err := time.Parse(time.RFC3339, "2026-05-01T10:00:02Z")
+	if err != nil {
+		t.Fatalf("parse assistant dt: %v", err)
+	}
+	userTime := userTS.Local().Format("15:04:05")
+	assistantTime := assistantTS.Local().Format("15:04:05")
+	if !strings.Contains(rendered, "  "+userTime+" | first prompt") {
+		t.Fatalf("expected user prompt in output, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "   "+assistantTime+" | < first response") {
+		t.Fatalf("expected indented assistant output row, got %q", rendered)
+	}
+}
+
 func TestRetrofitSessionIndexAssignsStableNumbers(t *testing.T) {
 	stateDir := t.TempDir()
 	interactions := []interaction{
@@ -860,6 +1207,52 @@ func TestBuildConversationMessages(t *testing.T) {
 	}
 	if strings.TrimSpace(got[0].Dt) == "" || strings.TrimSpace(got[1].Dt) == "" {
 		t.Fatalf("expected dt on all messages, got %+v", got)
+	}
+}
+
+func TestAppendConversationUserMessageCreatesConversationLog(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.conversation.json")
+	if err := appendConversationUserMessage(path, "hello there"); err != nil {
+		t.Fatalf("appendConversationUserMessage: %v", err)
+	}
+	got, err := readConversationLog(path)
+	if err != nil {
+		t.Fatalf("readConversationLog: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 message, got %d (%+v)", len(got), got)
+	}
+	if got[0].Role != "user" || got[0].Text != "hello there" {
+		t.Fatalf("unexpected message: %+v", got[0])
+	}
+	if strings.TrimSpace(got[0].Dt) == "" {
+		t.Fatalf("expected dt on appended message, got %+v", got[0])
+	}
+}
+
+func TestAppendConversationUserMessageAppendsToExistingLog(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.conversation.json")
+	seed := []conversationMessage{
+		{Dt: "2026-05-03T08:00:00Z", Role: "assistant", Text: "hello"},
+	}
+	if err := writeConversationLog(path, seed); err != nil {
+		t.Fatalf("writeConversationLog seed: %v", err)
+	}
+	if err := appendConversationUserMessage(path, "new prompt"); err != nil {
+		t.Fatalf("appendConversationUserMessage: %v", err)
+	}
+	got, err := readConversationLog(path)
+	if err != nil {
+		t.Fatalf("readConversationLog: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 messages, got %d (%+v)", len(got), got)
+	}
+	if got[0].Role != "assistant" || got[0].Text != "hello" {
+		t.Fatalf("unexpected first message: %+v", got[0])
+	}
+	if got[1].Role != "user" || got[1].Text != "new prompt" {
+		t.Fatalf("unexpected second message: %+v", got[1])
 	}
 }
 
