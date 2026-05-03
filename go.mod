@@ -5,6 +5,7 @@ go 1.23.0
 require (
 	github.com/creack/pty v1.1.24
 	golang.org/x/term v0.30.0
+	modernc.org/sqlite v1.34.5
 )
 
 require (
@@ -17,5 +18,4 @@ require (
 	modernc.org/libc v1.55.3 // indirect
 	modernc.org/mathutil v1.6.0 // indirect
 	modernc.org/memory v1.8.0 // indirect
-	modernc.org/sqlite v1.34.5 // indirect
 )

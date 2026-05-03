@@ -24,11 +24,10 @@ make build
 ```bash
 make build
 make test
-make cover
-make vet
 ```
 
 `make build` increments the patch version in `VERSION` before building.
+`make test` runs the same checks as GitHub CI (unit tests, coverage, vet, benchmark thresholds, vulnerability scan, and GoReleaser config validation).
 
 ## Quick usage
 

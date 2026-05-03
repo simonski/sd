@@ -7,7 +7,7 @@ VERSION_FILE := VERSION
 VERSION ?= $(shell (cat $(VERSION_FILE) 2>/dev/null || git describe --tags --abbrev=0 2>/dev/null || echo v0.0.0) | sed 's/^v//')
 PUBLISH_TAG ?=
 
-.PHONY: help build install test cover vet bench bench-check ci publish bump-version
+.PHONY: help build install unit-test test cover vet bench bench-check vuln release-check ci publish bump-version
 
 help:
 	@echo "Usage: make <target>"
@@ -15,11 +15,14 @@ help:
 	@echo "Targets:"
 	@echo "  build    Increment patch version in $(VERSION_FILE) and build $(BINARY) into $(BIN_DIR)/"
 	@echo "  install  Install $(BINARY) to GOBIN using go install"
-	@echo "  test     Run Go tests"
+	@echo "  unit-test Run Go unit tests only"
+	@echo "  test     Run the same checks as GitHub CI"
 	@echo "  cover    Run Go tests with coverage"
 	@echo "  vet      Run go vet"
 	@echo "  bench    Run benchmark suite"
 	@echo "  bench-check  Run benchmark threshold checks"
+	@echo "  vuln     Run govulncheck ./..."
+	@echo "  release-check  Validate .goreleaser config"
 	@echo "  ci       Run local CI-equivalent checks"
 	@echo "  publish  Create/push release tag, publish GitHub release + Homebrew formula"
 
@@ -40,7 +43,7 @@ build: bump-version
 install:
 	@VERSION=$$(cat $(VERSION_FILE) 2>/dev/null || echo $(VERSION)); go install -ldflags "-X main.version=$$VERSION" $(PKG)
 
-test:
+unit-test:
 	@go test ./...
 
 cover:
@@ -55,35 +58,45 @@ bench:
 bench-check:
 	@./scripts/check-bench.sh
 
-ci: test cover vet bench-check
+vuln:
+	@command -v govulncheck >/dev/null 2>&1 || go install golang.org/x/vuln/cmd/govulncheck@latest
+	@govulncheck ./...
+
+release-check:
+	@go run github.com/goreleaser/goreleaser/v2@latest check
+
+test: unit-test cover vet bench-check vuln release-check
+	@echo "test checks complete"
+
+ci: test
 	@echo "ci checks complete"
 
 publish:
 	@command -v goreleaser >/dev/null 2>&1 || (echo "goreleaser is required for publish"; exit 1)
-	@TAG="$(PUBLISH_TAG)"; \
+	@VERSION=$$(cat $(VERSION_FILE) 2>/dev/null || echo $(VERSION)); \
+	VERSION=$${VERSION#v}; \
+	EXPECTED_TAG="v$$VERSION"; \
+	TAG="$(PUBLISH_TAG)"; \
 	if [ -z "$$TAG" ]; then \
-		if git describe --tags --exact-match >/dev/null 2>&1; then \
-			TAG=$$(git describe --tags --exact-match); \
-			echo "Using existing tag on HEAD: $$TAG"; \
-		else \
-			LATEST=$$(git tag --list 'v*' --sort=-v:refname | head -n1); \
-			if [ -z "$$LATEST" ]; then \
-				TAG="v0.1.0"; \
-			else \
-				NUM=$${LATEST#v}; \
-				MAJOR=$${NUM%%.*}; REST=$${NUM#*.}; MINOR=$${REST%%.*}; PATCH=$${REST#*.}; \
-				TAG="v$$MAJOR.$$MINOR.$$((PATCH+1))"; \
-			fi; \
-			echo "Creating and pushing release tag $$TAG"; \
-			git tag -a "$$TAG" -m "Release $$TAG"; \
-			git push origin "$$TAG"; \
-		fi; \
+		TAG="$$EXPECTED_TAG"; \
+		echo "Using publish tag from $(VERSION_FILE): $$TAG"; \
 	else \
 		echo "Using requested publish tag: $$TAG"; \
-		if ! git rev-parse "$$TAG" >/dev/null 2>&1; then \
-			git tag -a "$$TAG" -m "Release $$TAG"; \
-			git push origin "$$TAG"; \
+		if [ "$$TAG" != "$$EXPECTED_TAG" ]; then \
+			echo "PUBLISH_TAG ($$TAG) must match $(VERSION_FILE) ($$EXPECTED_TAG)"; \
+			exit 1; \
 		fi; \
+	fi; \
+	if git rev-parse "$$TAG" >/dev/null 2>&1; then \
+		if ! git describe --tags --exact-match --match "$$TAG" >/dev/null 2>&1; then \
+			echo "Tag $$TAG already exists but is not on HEAD. Bump $(VERSION_FILE) or move to the tagged commit."; \
+			exit 1; \
+		fi; \
+		echo "Using existing tag on HEAD: $$TAG"; \
+	else \
+		echo "Creating and pushing release tag $$TAG"; \
+		git tag -a "$$TAG" -m "Release $$TAG"; \
+		git push origin "$$TAG"; \
 	fi
 	@if [ -z "$$GITHUB_TOKEN" ] && [ -z "$$GH_TOKEN" ]; then \
 		command -v gh >/dev/null 2>&1 || (echo "gh CLI is required when GITHUB_TOKEN/GH_TOKEN is not set"; exit 1); \

@@ -17,24 +17,5 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Test
+      - name: Run CI-equivalent checks via Makefile
         run: make test
-
-      - name: Coverage
-        run: make cover
-
-      - name: Vet
-        run: make vet
-
-      - name: Benchmark threshold checks
-        run: |
-          chmod +x scripts/check-bench.sh
-          make bench-check
-
-      - name: Vulnerability scan
-        run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
-          govulncheck ./...
-
-      - name: GoReleaser config check
-        run: go run github.com/goreleaser/goreleaser/v2@latest check
