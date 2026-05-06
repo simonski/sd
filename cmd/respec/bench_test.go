@@ -26,7 +26,7 @@ func BenchmarkPrintInputHistory(b *testing.B) {
 }
 
 func BenchmarkWrapWordsNoSplit(b *testing.B) {
-	text := "sd benchmark wraps long lines without splitting words and keeps readability under constrained widths"
+	text := "respec benchmark wraps long lines without splitting words and keeps readability under constrained widths"
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		_ = wrapWordsNoSplit(text, 40)

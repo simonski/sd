@@ -1,15 +1,15 @@
 version: 2
 
-project_name: sd
+project_name: respec
 
 before:
   hooks:
     - go mod tidy
 
 builds:
-  - id: sd
-    main: ./cmd/sd
-    binary: sd
+  - id: respec
+    main: ./cmd/respec
+    binary: respec
     env:
       - CGO_ENABLED=0
     goos:
@@ -22,7 +22,7 @@ builds:
       - -s -w -X main.version={{ .Version }}
 
 archives:
-  - id: sd-archive
+  - id: respec-archive
     formats: [tar.gz]
     files:
       - none*
@@ -31,8 +31,8 @@ checksum:
   name_template: checksums.txt
 
 brews:
-  - name: sd
-    homepage: https://github.com/simonski/sd
+  - name: respec
+    homepage: https://github.com/simonski/respec
     description: Spec-driven wrapper for agentic programming CLIs
     license: MIT
     repository:
@@ -41,12 +41,12 @@ brews:
       branch: main
     directory: Formula
     commit_author:
-      name: sd-release-bot
+      name: respec-release-bot
       email: 223556219+Copilot@users.noreply.github.com
     test: |
-      system "#{bin}/sd", "help"
+      system "#{bin}/respec", "help"
 
 release:
   github:
     owner: simonski
-    name: sd
+    name: respec

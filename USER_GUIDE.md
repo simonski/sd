@@ -1,15 +1,15 @@
 # USER GUIDE
 
-This guide reflects current `sd` behavior and is organized for fast task completion.
+This guide reflects current `respec` behavior and is organized for fast task completion.
 
 ## 1. Day-one setup
 
 ```bash
-sd init
-alias copilot="sd copilot"
+respec init
+alias copilot="respec copilot"
 ```
 
-`sd init` creates `.sd/` state and can install the embedded `sd` skill.
+`respec init` creates `.respec/` state and can install the embedded `respec` skill.
 
 ## 2. Core workflow
 
@@ -20,8 +20,8 @@ alias copilot="sd copilot"
 ```bash
 copilot
 # work...
-sd spec
-sd history
+respec spec
+respec history
 ```
 
 ## 3. Command reference
@@ -29,42 +29,42 @@ sd history
 ### Cross-session history (interaction IDs)
 
 ```bash
-sd history
-sd ls
-sd history -o
-sd history 120-125
-sd history 120 125
-sd history -from 10 -to 30
-sd hide 12
-sd unhide 12
+respec history
+respec ls
+respec history -o
+respec history 120-125
+respec history 120 125
+respec history -from 10 -to 30
+respec hide 12
+respec unhide 12
 ```
 
 ### Session operations
 
 ```bash
-sd ls
-sd ls 1
-sd cat 1
-sd hide 1
-sd unhide 1
-sd rm 1
+respec ls
+respec ls 1
+respec cat 1
+respec hide 1
+respec unhide 1
+respec rm 1
 ```
 
 ### Diagnostics
 
 ```bash
-sd doctor
+respec doctor
 ```
 
 ## 4. Troubleshooting
 
-### `sd: wrapped sessions require a git workspace`
+### `respec: wrapped sessions require a git workspace`
 
-Run `sd` inside a git repository.
+Run `respec` inside a git repository.
 
 ### Overlay won’t open
 
-Run `sd doctor`. Overlay is supported in tmux and native macOS Terminal.  
+Run `respec doctor`. Overlay is supported in tmux and native macOS Terminal.  
 Set `SD_PANEL_DEBUG=1` for debug diagnostics.
 
 ### History looks incomplete
@@ -72,8 +72,8 @@ Set `SD_PANEL_DEBUG=1` for debug diagnostics.
 Check hidden entries and filters:
 
 ```bash
-sd history -a
-sd ls --hidden
+respec history -a
+respec ls --hidden
 ```
 
 ### Color output issues
@@ -81,10 +81,10 @@ sd ls --hidden
 Disable ANSI colors:
 
 ```bash
-NO_COLOR=1 sd history
+NO_COLOR=1 respec history
 ```
 
 ## 5. Notes
 
-- `sd history` is an alias for `sd inputs`.
-- `sd cat` and `sd get` provide per-session detail views.
+- `respec history` is an alias for `respec inputs`.
+- `respec cat` and `respec get` provide per-session detail views.

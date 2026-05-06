@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "binary": "sd",
+  "binary": "respec",
   "commands": [
     {"name": "init", "kind": "builtin"},
     {"name": "session", "kind": "builtin"},

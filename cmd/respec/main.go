@@ -22,13 +22,13 @@ import (
 	"unicode/utf8"
 
 	"github.com/creack/pty"
-	"github.com/simonski/sd/internal/bootstrap"
+	"github.com/simonski/respec/internal/bootstrap"
 	"golang.org/x/term"
 )
 
 var version = "dev"
 
-const stateDirName = ".sd"
+const stateDirName = ".respec"
 
 var (
 	incrementalPollInterval = 2 * time.Second
@@ -138,7 +138,7 @@ type inputHistoryEntry struct {
 func main() {
 	code, err := run(os.Args[1:], os.Stdout, os.Stderr)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "sd: %v\n", err)
+		fmt.Fprintf(os.Stderr, "respec: %v\n", err)
 	}
 	os.Exit(code)
 }
@@ -187,33 +187,33 @@ func run(args []string, out io.Writer, errOut io.Writer) (int, error) {
 
 func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "Usage:")
-	fmt.Fprintln(out, "  sd <command>")
-	fmt.Fprintln(out, "  sd <agent-binary> [args...]")
+	fmt.Fprintln(out, "  respec <command>")
+	fmt.Fprintln(out, "  respec <agent-binary> [args...]")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Hardcoded commands:")
 	fmt.Fprintln(out, "  help      Show this usage output")
-	fmt.Fprintln(out, "  version   Show sd version")
-	fmt.Fprintln(out, "  init      Create/update .sd workspace in the current repo")
-	fmt.Fprintln(out, "  session   Session subcommands (`sd session ls|history|count|hide|show|rm ...`)")
-	fmt.Fprintln(out, "  ls        List sessions, or show abbreviated interactions for one session (`sd ls N`)")
+	fmt.Fprintln(out, "  version   Show respec version")
+	fmt.Fprintln(out, "  init      Create/update .respec workspace in the current repo")
+	fmt.Fprintln(out, "  session   Session subcommands (`respec session ls|history|count|hide|show|rm ...`)")
+	fmt.Fprintln(out, "  ls        List sessions, or show abbreviated interactions for one session (`respec ls N`)")
 	fmt.Fprintln(out, "  cat       Show full logs/details for one session")
 	fmt.Fprintln(out, "  hide      Soft-delete a session from ls/cat")
 	fmt.Fprintln(out, "  show      Restore a hidden session")
-	fmt.Fprintln(out, "  unhide    Restore a hidden session (`sd unhide N` from `sd ls --hidden`)")
-	fmt.Fprintln(out, "  rm        Hard-delete one session (`sd rm N`)")
+	fmt.Fprintln(out, "  unhide    Restore a hidden session (`respec unhide N` from `respec ls --hidden`)")
+	fmt.Fprintln(out, "  rm        Hard-delete one session (`respec rm N`)")
 	fmt.Fprintln(out, "  prune     Remove hidden sessions and orphan artifacts")
 	fmt.Fprintln(out, "  inputs    Print user input sequence across sessions")
-	fmt.Fprintln(out, "  history   Alias for `sd inputs`")
+	fmt.Fprintln(out, "  history   Alias for `respec inputs`")
 	fmt.Fprintln(out, "  count     Count captured interactions")
 	fmt.Fprintln(out, "  checkpoint Manage and apply session checkpoints")
-	fmt.Fprintln(out, "  get       Show cleaned input for one session (`sd get N`)")
+	fmt.Fprintln(out, "  get       Show cleaned input for one session (`respec get N`)")
 	fmt.Fprintln(out, "  doctor    Show terminal/overlay capability diagnostics")
-	fmt.Fprintln(out, "  spec      Assemble generated spec view from .sd/state.db state")
+	fmt.Fprintln(out, "  spec      Assemble generated spec view from .respec/state.db state")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Agent wrapper examples:")
-	fmt.Fprintln(out, "  sd copilot")
-	fmt.Fprintln(out, "  sd codex")
-	fmt.Fprintln(out, "  sd claude")
+	fmt.Fprintln(out, "  respec copilot")
+	fmt.Fprintln(out, "  respec codex")
+	fmt.Fprintln(out, "  respec claude")
 }
 
 func semanticVersion(raw string) string {
@@ -281,7 +281,7 @@ func runSpec(out io.Writer) (int, error) {
 	}
 
 	var b strings.Builder
-	b.WriteString("# Generated Spec View (`sd spec`)\n\n")
+	b.WriteString("# Generated Spec View (`respec spec`)\n\n")
 	b.WriteString(fmt.Sprintf("- Source repo: `%s`\n", filepath.Base(repoRoot)))
 	b.WriteString(fmt.Sprintf("- Interaction schema: v%d\n", interactionSchemaVersion))
 	b.WriteString(fmt.Sprintf("- Interaction records: %d\n\n", len(interactions)))
@@ -403,7 +403,7 @@ func runSpec(out io.Writer) (int, error) {
 	}
 
 	fmt.Fprintln(out, generated)
-	fmt.Fprintln(out, "Updated generated spec in .sd/state.db")
+	fmt.Fprintln(out, "Updated generated spec in .respec/state.db")
 	return 0, nil
 }
 
@@ -493,10 +493,10 @@ func runLs(args []string, out io.Writer) (int, error) {
 	}
 
 	if !options.HasIndex {
-		fmt.Fprintln(out, "To inspect one session, run `sd ls N` (for example: `sd ls 0`).")
-		fmt.Fprintln(out, "For full session output, run `sd cat N`.")
-		fmt.Fprintln(out, "To soft-delete one session, run `sd hide N`.")
-		fmt.Fprintln(out, "Use `sd ls --hidden` to list hidden sessions.")
+		fmt.Fprintln(out, "To inspect one session, run `respec ls N` (for example: `respec ls 0`).")
+		fmt.Fprintln(out, "For full session output, run `respec cat N`.")
+		fmt.Fprintln(out, "To soft-delete one session, run `respec hide N`.")
+		fmt.Fprintln(out, "Use `respec ls --hidden` to list hidden sessions.")
 		return 0, nil
 	}
 	selected, ok := findSessionByNumber(sessions, options.Index)
@@ -524,7 +524,7 @@ func runCat(args []string, out io.Writer) (int, error) {
 		args = args[1:]
 	}
 	if len(args) == 0 {
-		return 1, fmt.Errorf("missing session number; use `sd cat N`")
+		return 1, fmt.Errorf("missing session number; use `respec cat N`")
 	}
 	n, parseErr := strconv.Atoi(args[0])
 	if parseErr != nil {
@@ -567,7 +567,7 @@ func runHide(args []string, out io.Writer) (int, error) {
 	}
 
 	if len(args) == 0 {
-		return 1, fmt.Errorf("missing session number; use `sd hide N`")
+		return 1, fmt.Errorf("missing session number; use `respec hide N`")
 	}
 	n, parseErr := strconv.Atoi(args[0])
 	if parseErr != nil {
@@ -600,7 +600,7 @@ func runHide(args []string, out io.Writer) (int, error) {
 		EventType:     eventTypeHide,
 		SessionID:     target.MatchKey,
 		Timestamp:     time.Now().UTC().Format(time.RFC3339),
-		Command:       "sd",
+		Command:       "respec",
 		Args:          []string{"hide", strconv.Itoa(n)},
 		ExitCode:      0,
 	})
@@ -618,7 +618,7 @@ func runUnhide(args []string, out io.Writer) (int, error) {
 		return 1, err
 	}
 	if len(args) == 0 {
-		return 1, fmt.Errorf("missing session number; use `sd unhide N` from `sd ls --hidden`")
+		return 1, fmt.Errorf("missing session number; use `respec unhide N` from `respec ls --hidden`")
 	}
 	n, parseErr := strconv.Atoi(args[0])
 	if parseErr != nil {
@@ -651,7 +651,7 @@ func runUnhide(args []string, out io.Writer) (int, error) {
 		EventType:     eventTypeUnhide,
 		SessionID:     target.MatchKey,
 		Timestamp:     time.Now().UTC().Format(time.RFC3339),
-		Command:       "sd",
+		Command:       "respec",
 		Args:          []string{"unhide", strconv.Itoa(n)},
 		ExitCode:      0,
 	})
@@ -675,7 +675,7 @@ func runRm(args []string, out io.Writer) (int, error) {
 		args = args[1:]
 	}
 	if len(args) == 0 {
-		return 1, fmt.Errorf("missing session number; use `sd rm N`")
+		return 1, fmt.Errorf("missing session number; use `respec rm N`")
 	}
 	n, parseErr := strconv.Atoi(args[0])
 	if parseErr != nil {
@@ -714,7 +714,7 @@ func runRm(args []string, out io.Writer) (int, error) {
 		EventType:     eventTypeRemove,
 		SessionID:     target.MatchKey,
 		Timestamp:     time.Now().UTC().Format(time.RFC3339),
-		Command:       "sd",
+		Command:       "respec",
 		Args:          []string{"rm", strconv.Itoa(n)},
 		ExitCode:      0,
 	})
@@ -816,7 +816,7 @@ func runGet(args []string, out io.Writer) (int, error) {
 		return 1, err
 	}
 	if len(args) == 0 {
-		return 1, fmt.Errorf("missing session number; use `sd get N`")
+		return 1, fmt.Errorf("missing session number; use `respec get N`")
 	}
 	n, parseErr := strconv.Atoi(args[0])
 	if parseErr != nil {
@@ -897,7 +897,7 @@ func runAgent(command string, args []string, errOut io.Writer) (int, error) {
 
 	before, beforeErr := snapshotRepoStatus(repoRoot)
 	if beforeErr != nil {
-		fmt.Fprintf(errOut, "sd: wrapper warning: failed to snapshot pre-session file status: %v\n", beforeErr)
+		fmt.Fprintf(errOut, "respec: wrapper warning: failed to snapshot pre-session file status: %v\n", beforeErr)
 	}
 
 	interactionsPath := filepath.Join(stateDir, "interactions.ndjson")
@@ -1023,7 +1023,7 @@ func runAgent(command string, args []string, errOut io.Writer) (int, error) {
 		appendErr := appendConversationUserMessage(conversationPath, inputPreview)
 		conversationLogMu.Unlock()
 		if appendErr != nil {
-			fmt.Fprintf(errOut, "sd: wrapper warning: failed to persist submitted input: %v\n", appendErr)
+			fmt.Fprintf(errOut, "respec: wrapper warning: failed to persist submitted input: %v\n", appendErr)
 		}
 	}, func(outputLine string) {
 		msg, ok := assistantMessageFromOutputLine(outputLine)
@@ -1034,14 +1034,14 @@ func runAgent(command string, args []string, errOut io.Writer) (int, error) {
 		appendErr := appendConversationAssistantMessage(conversationPath, msg)
 		conversationLogMu.Unlock()
 		if appendErr != nil {
-			fmt.Fprintf(errOut, "sd: wrapper warning: failed to persist assistant output line: %v\n", appendErr)
+			fmt.Fprintf(errOut, "respec: wrapper warning: failed to persist assistant output line: %v\n", appendErr)
 		}
 	})
 	close(stopSig)
 	signal.Stop(termSignals)
 	<-sigDone
 	if execErr != nil && !errors.Is(execErr, io.EOF) {
-		fmt.Fprintf(errOut, "sd: wrapper warning: %v\n", execErr)
+		fmt.Fprintf(errOut, "respec: wrapper warning: %v\n", execErr)
 	}
 	if watcherStop != nil {
 		close(watcherStop)
@@ -1050,7 +1050,7 @@ func runAgent(command string, args []string, errOut io.Writer) (int, error) {
 
 	after, afterErr := snapshotRepoStatus(repoRoot)
 	if afterErr != nil {
-		fmt.Fprintf(errOut, "sd: wrapper warning: failed to snapshot post-session file status: %v\n", afterErr)
+		fmt.Fprintf(errOut, "respec: wrapper warning: failed to snapshot post-session file status: %v\n", afterErr)
 	}
 
 	modified := []string{}
@@ -1063,7 +1063,7 @@ func runAgent(command string, args []string, errOut io.Writer) (int, error) {
 	writeErr := writeConversationLog(conversationPath, conversationMessages)
 	conversationLogMu.Unlock()
 	if writeErr != nil {
-		fmt.Fprintf(errOut, "sd: wrapper warning: failed to write conversation log: %v\n", writeErr)
+		fmt.Fprintf(errOut, "respec: wrapper warning: failed to write conversation log: %v\n", writeErr)
 	}
 	finalPreview := buildInputPreviewFromConversation(conversationMessages)
 	appendEvent(eventTypeFinal, exitCode, false, modified, finalPreview)
@@ -1215,11 +1215,11 @@ func (c *specPanelController) nativeSupported() bool {
 
 func (c *specPanelController) toggleOrFocus() bool {
 	if !c.available() {
-		fmt.Fprintln(os.Stdout, "sd: panel debug: overlay unavailable (no supported terminal backend)")
+		fmt.Fprintln(os.Stdout, "respec: panel debug: overlay unavailable (no supported terminal backend)")
 		return false
 	}
 	if c.isVisible() {
-		fmt.Fprintln(os.Stdout, "sd: panel debug: overlay already visible")
+		fmt.Fprintln(os.Stdout, "respec: panel debug: overlay already visible")
 		return true
 	}
 	if c.tmuxAvailable() {
@@ -1232,7 +1232,7 @@ func (c *specPanelController) toggleOrFocus() bool {
 }
 
 func (c *specPanelController) openTmuxOverlay() bool {
-	panelCmd := "sd spec 2>/dev/null | ${PAGER:-less}; exec ${SHELL:-sh} -i"
+	panelCmd := "respec spec 2>/dev/null | ${PAGER:-less}; exec ${SHELL:-sh} -i"
 	err := exec.Command(
 		"tmux", "display-popup",
 		"-t", c.agentPane,
@@ -1245,11 +1245,11 @@ func (c *specPanelController) openTmuxOverlay() bool {
 		"sh", "-lc", panelCmd,
 	).Run()
 	if err != nil {
-		fmt.Fprintf(os.Stdout, "sd: panel debug: display-popup failed: %v\n", err)
+		fmt.Fprintf(os.Stdout, "respec: panel debug: display-popup failed: %v\n", err)
 		return false
 	}
 	if !c.popupVisible() {
-		fmt.Fprintln(os.Stdout, "sd: panel debug: popup not visible after display-popup")
+		fmt.Fprintln(os.Stdout, "respec: panel debug: popup not visible after display-popup")
 		return false
 	}
 	c.mu.Lock()
@@ -1267,7 +1267,7 @@ func (c *specPanelController) openNativeOverlay() bool {
 
 	content := c.loadGeneratedSpec()
 	if err := c.renderNativeOverlay(content); err != nil {
-		fmt.Fprintf(os.Stdout, "sd: panel debug: native overlay render failed: %v\n", err)
+		fmt.Fprintf(os.Stdout, "respec: panel debug: native overlay render failed: %v\n", err)
 		c.mu.Lock()
 		c.panelOpen = false
 		c.native = false
@@ -1368,14 +1368,14 @@ func (c *specPanelController) popupVisible() bool {
 func (c *specPanelController) loadGeneratedSpec() string {
 	_, stateDir, err := ensureState(c.repoRoot)
 	if err != nil {
-		return fmt.Sprintf("sd: failed to initialize state: %v", err)
+		return fmt.Sprintf("respec: failed to initialize state: %v", err)
 	}
 	if err := c.regenerateGeneratedSpec(); err != nil {
-		fmt.Fprintf(os.Stdout, "sd: panel debug: failed to regenerate spec: %v\n", err)
+		fmt.Fprintf(os.Stdout, "respec: panel debug: failed to regenerate spec: %v\n", err)
 	}
 	raw, err := readGeneratedSpecFromDB(stateDir)
 	if err != nil {
-		return fmt.Sprintf("sd: no generated spec available\n\nRun `sd spec` to generate it.\n\nError: %v", err)
+		return fmt.Sprintf("respec: no generated spec available\n\nRun `respec spec` to generate it.\n\nError: %v", err)
 	}
 	return raw
 }
@@ -1456,7 +1456,7 @@ func buildNativeOverlayFrame(panelCol, panelWidth, height, maxBodyLines int, bod
 	top := "+" + strings.Repeat("-", max(panelWidth-2, 0)) + "+"
 	fmt.Fprintf(&b, "\x1b[1;%dH%s", panelCol, fitOverlayLine(top, panelWidth))
 
-	title := "| sd spec overlay (Esc to close)"
+	title := "| respec spec overlay (Esc to close)"
 	fmt.Fprintf(&b, "\x1b[2;%dH%s", panelCol, fitOverlayLine(title, panelWidth))
 
 	for row := 0; row < maxBodyLines; row++ {

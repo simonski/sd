@@ -28,6 +28,6 @@ Security fixes are provided for the latest released version and `main`.
 
 ## Security hardening notes
 
-- `sd` stores local session data under `.sd/`; users should treat this directory as sensitive.
+- `respec` stores local session data under `.respec/`; users should treat this directory as sensitive.
 - For shared machines, enforce filesystem permissions and use encrypted home directories.
 

@@ -24,7 +24,7 @@ func runDoctor(args []string, out io.Writer) (int, error) {
 	}
 
 	info := detectTerminalDoctorInfo(os.Getenv)
-	fmt.Fprintln(out, "sd doctor")
+	fmt.Fprintln(out, "respec doctor")
 	fmt.Fprintf(out, "Terminal: %s\n", info.TerminalName)
 	if info.TermProgram != "" {
 		fmt.Fprintf(out, "TERM_PROGRAM: %s\n", info.TermProgram)

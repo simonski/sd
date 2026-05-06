@@ -31,7 +31,7 @@ func TestSemanticVersion(t *testing.T) {
 }
 
 func TestCompactSmallSessionFilesCollectsWithoutDeletingOriginals(t *testing.T) {
-	stateDir := filepath.Join(t.TempDir(), ".sd")
+	stateDir := filepath.Join(t.TempDir(), ".respec")
 	sessionsDir := filepath.Join(stateDir, "sessions")
 	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
 		t.Fatalf("mkdir sessions: %v", err)
@@ -49,9 +49,9 @@ func TestCompactSmallSessionFilesCollectsWithoutDeletingOriginals(t *testing.T) 
 		t.Fatalf("write large: %v", err)
 	}
 	if err := writeInteractionTimeline(filepath.Join(stateDir, "interactions.ndjson"), []interaction{
-		{SessionID: "a", Timestamp: "2026-05-03T06:00:00Z", Command: "copilot", ConversationLog: ".sd/sessions/a.conversation.json"},
-		{SessionID: "b", Timestamp: "2026-05-03T06:00:01Z", Command: "copilot", ConversationLog: ".sd/sessions/b.conversation.json"},
-		{SessionID: "c", Timestamp: "2026-05-03T06:00:02Z", Command: "copilot", ConversationLog: ".sd/sessions/large.conversation.json"},
+		{SessionID: "a", Timestamp: "2026-05-03T06:00:00Z", Command: "copilot", ConversationLog: ".respec/sessions/a.conversation.json"},
+		{SessionID: "b", Timestamp: "2026-05-03T06:00:01Z", Command: "copilot", ConversationLog: ".respec/sessions/b.conversation.json"},
+		{SessionID: "c", Timestamp: "2026-05-03T06:00:02Z", Command: "copilot", ConversationLog: ".respec/sessions/large.conversation.json"},
 	}); err != nil {
 		t.Fatalf("write interactions: %v", err)
 	}
@@ -76,13 +76,13 @@ func TestCompactSmallSessionFilesCollectsWithoutDeletingOriginals(t *testing.T) 
 		}
 		gotByPath[file.Path] = decoded
 	}
-	if got := gotByPath[".sd/sessions/a.conversation.json"]; string(got) != string(smallA) {
+	if got := gotByPath[".respec/sessions/a.conversation.json"]; string(got) != string(smallA) {
 		t.Fatalf("unexpected compacted content for a: %q", string(got))
 	}
-	if got := gotByPath[".sd/sessions/b.conversation.json"]; string(got) != string(smallB) {
+	if got := gotByPath[".respec/sessions/b.conversation.json"]; string(got) != string(smallB) {
 		t.Fatalf("unexpected compacted content for b: %q", string(got))
 	}
-	if _, ok := gotByPath[".sd/sessions/large.conversation.json"]; ok {
+	if _, ok := gotByPath[".respec/sessions/large.conversation.json"]; ok {
 		t.Fatalf("did not expect large file to be compacted")
 	}
 	if _, err := os.Stat(filepath.Join(sessionsDir, "a.conversation.json")); err != nil {
@@ -157,7 +157,7 @@ func TestRunDoctorPrintsDiagnostics(t *testing.T) {
 		t.Fatalf("expected exit code 0, got %d", code)
 	}
 	rendered := out.String()
-	if !strings.Contains(rendered, "sd doctor\n") {
+	if !strings.Contains(rendered, "respec doctor\n") {
 		t.Fatalf("expected doctor header, got %q", rendered)
 	}
 	if !strings.Contains(rendered, "Terminal: ") {
@@ -234,17 +234,17 @@ func TestChangedFilesBetween(t *testing.T) {
 
 func TestFilterIncrementalFilesSkipsSessionArtifacts(t *testing.T) {
 	in := []string{
-		".sd/interactions.ndjson",
-		".sd/sessions/20260430T000000Z-copilot.stdin.log",
-		".sd/sessions/20260430T000000Z-copilot.stdout.log",
+		".respec/interactions.ndjson",
+		".respec/sessions/20260430T000000Z-copilot.stdin.log",
+		".respec/sessions/20260430T000000Z-copilot.stdout.log",
 		"SPEC.md",
-		"cmd/sd/main.go",
+		"cmd/respec/main.go",
 	}
 	got := filterIncrementalFiles(in)
 	if len(got) != 2 {
 		t.Fatalf("expected 2 filtered files, got %d (%v)", len(got), got)
 	}
-	if got[0] != "SPEC.md" || got[1] != "cmd/sd/main.go" {
+	if got[0] != "SPEC.md" || got[1] != "cmd/respec/main.go" {
 		t.Fatalf("unexpected filtered files: %v", got)
 	}
 }
@@ -595,10 +595,10 @@ func TestRunLsNoArgsPrintsSelectionHintAndExitsZero(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o755); err != nil {
 		t.Fatalf("mkdir .git: %v", err)
 	}
-	if err := os.MkdirAll(filepath.Join(root, ".sd"), 0o755); err != nil {
-		t.Fatalf("mkdir .sd: %v", err)
+	if err := os.MkdirAll(filepath.Join(root, ".respec"), 0o755); err != nil {
+		t.Fatalf("mkdir .respec: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(root, ".sd", "interactions.ndjson"), []byte(`{"session_id":"s1","timestamp":"2026-04-30T00:00:00Z","command":"copilot","args":[],"exit_code":0}`+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, ".respec", "interactions.ndjson"), []byte(`{"session_id":"s1","timestamp":"2026-04-30T00:00:00Z","command":"copilot","args":[],"exit_code":0}`+"\n"), 0o644); err != nil {
 		t.Fatalf("write interactions: %v", err)
 	}
 
@@ -621,7 +621,7 @@ func TestRunLsNoArgsPrintsSelectionHintAndExitsZero(t *testing.T) {
 	}
 
 	rendered := out.String()
-	if !strings.Contains(rendered, "To inspect one session, run `sd ls N`") {
+	if !strings.Contains(rendered, "To inspect one session, run `respec ls N`") {
 		t.Fatalf("expected selection hint, got %q", rendered)
 	}
 	if strings.Contains(rendered, "Select session number to view") {
@@ -742,10 +742,10 @@ func TestWriteAndReadHiddenSessionIDsRoundTrip(t *testing.T) {
 
 func TestSummarizeSessionsIncludesLegacyByStdinLog(t *testing.T) {
 	in := []interaction{
-		{Timestamp: "t1", Command: "copilot", StdinLog: ".sd/sessions/a.stdin.log"},
-		{Timestamp: "t2", Command: "copilot", StdinLog: ".sd/sessions/a.stdin.log"},
+		{Timestamp: "t1", Command: "copilot", StdinLog: ".respec/sessions/a.stdin.log"},
+		{Timestamp: "t2", Command: "copilot", StdinLog: ".respec/sessions/a.stdin.log"},
 	}
-	got := summarizeSessions(in, map[string]struct{}{}, map[string]int{"legacy:.sd/sessions/a.stdin.log": 0})
+	got := summarizeSessions(in, map[string]struct{}{}, map[string]int{"legacy:.respec/sessions/a.stdin.log": 0})
 	if len(got) != 1 {
 		t.Fatalf("expected one legacy summary, got %d (%v)", len(got), got)
 	}
@@ -777,13 +777,13 @@ func TestFilterSessionSummariesSupportsHiddenAndAgent(t *testing.T) {
 
 func TestHardDeleteSessionRemovesEventsAndLogs(t *testing.T) {
 	repo := t.TempDir()
-	stateDir := filepath.Join(repo, ".sd")
+	stateDir := filepath.Join(repo, ".respec")
 	sessionsDir := filepath.Join(stateDir, "sessions")
 	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
 		t.Fatalf("mkdir sessions: %v", err)
 	}
 	interactionsPath := filepath.Join(stateDir, "interactions.ndjson")
-	conversationRel := ".sd/sessions/s1.conversation.json"
+	conversationRel := ".respec/sessions/s1.conversation.json"
 	if err := writeConversationLog(filepath.Join(repo, filepath.FromSlash(conversationRel)), []conversationMessage{
 		{Dt: "2026-04-30T10:00:00Z", Role: "user", Text: "in"},
 		{Dt: "2026-04-30T10:00:01Z", Role: "assistant", Text: "out"},
@@ -876,11 +876,11 @@ func TestPrintInputHistoryGroupsByDateAndTime(t *testing.T) {
 
 func TestCollectInputHistoryEntriesIncludesCommandAndConversationUsers(t *testing.T) {
 	repoRoot := t.TempDir()
-	sessionsDir := filepath.Join(repoRoot, ".sd", "sessions")
+	sessionsDir := filepath.Join(repoRoot, ".respec", "sessions")
 	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
 		t.Fatalf("mkdir sessions: %v", err)
 	}
-	conversationRel := ".sd/sessions/s1.conversation.json"
+	conversationRel := ".respec/sessions/s1.conversation.json"
 	conversationPath := filepath.Join(repoRoot, filepath.FromSlash(conversationRel))
 	conversation := []byte(`[
   {"dt":"2026-05-01T10:00:01Z","role":"user","text":"first prompt"},
@@ -924,11 +924,11 @@ func TestCollectInputHistoryEntriesIncludesCommandAndConversationUsers(t *testin
 
 func TestCollectInputHistoryEntriesIncludesAssistantOutputWhenEnabled(t *testing.T) {
 	repoRoot := t.TempDir()
-	sessionsDir := filepath.Join(repoRoot, ".sd", "sessions")
+	sessionsDir := filepath.Join(repoRoot, ".respec", "sessions")
 	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
 		t.Fatalf("mkdir sessions: %v", err)
 	}
-	conversationRel := ".sd/sessions/s1.conversation.json"
+	conversationRel := ".respec/sessions/s1.conversation.json"
 	conversationPath := filepath.Join(repoRoot, filepath.FromSlash(conversationRel))
 	conversation := []byte(`[
   {"dt":"2026-05-01T10:00:01Z","role":"user","text":"first prompt"},
@@ -1008,7 +1008,7 @@ func TestRunAgentWritesLifecycleEvents(t *testing.T) {
 		t.Fatalf("expected exit code 0, got %d", code)
 	}
 
-	interactionsPath := filepath.Join(repo, ".sd", "interactions.ndjson")
+	interactionsPath := filepath.Join(repo, ".respec", "interactions.ndjson")
 	events, err := readInteractionTimeline(interactionsPath)
 	if err != nil {
 		t.Fatalf("readInteractionTimeline: %v", err)
@@ -1038,15 +1038,15 @@ func TestRunHistoryAliasesInputs(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
 		t.Fatalf("mkdir .git: %v", err)
 	}
-	if err := os.MkdirAll(filepath.Join(repo, ".sd", "sessions"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(repo, ".respec", "sessions"), 0o755); err != nil {
 		t.Fatalf("mkdir sessions: %v", err)
 	}
-	stdinRel := ".sd/sessions/s1.stdin.log"
+	stdinRel := ".respec/sessions/s1.stdin.log"
 	if err := os.WriteFile(filepath.Join(repo, stdinRel), []byte("this is an input\r"), 0o644); err != nil {
 		t.Fatalf("write stdin log: %v", err)
 	}
-	raw := `{"session_id":"s1","timestamp":"2026-04-30T10:00:00Z","command":"copilot","args":[],"event_type":"final","exit_code":0,"stdin_log":".sd/sessions/s1.stdin.log","stdout_log":".sd/sessions/s1.stdout.log"}` + "\n"
-	if err := os.WriteFile(filepath.Join(repo, ".sd", "interactions.ndjson"), []byte(raw), 0o644); err != nil {
+	raw := `{"session_id":"s1","timestamp":"2026-04-30T10:00:00Z","command":"copilot","args":[],"event_type":"final","exit_code":0,"stdin_log":".respec/sessions/s1.stdin.log","stdout_log":".respec/sessions/s1.stdout.log"}` + "\n"
+	if err := os.WriteFile(filepath.Join(repo, ".respec", "interactions.ndjson"), []byte(raw), 0o644); err != nil {
 		t.Fatalf("write interactions: %v", err)
 	}
 
@@ -1077,10 +1077,10 @@ func TestRunHistoryIncludesOutputWithFlag(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
 		t.Fatalf("mkdir .git: %v", err)
 	}
-	if err := os.MkdirAll(filepath.Join(repo, ".sd", "sessions"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(repo, ".respec", "sessions"), 0o755); err != nil {
 		t.Fatalf("mkdir sessions: %v", err)
 	}
-	conversationRel := ".sd/sessions/s1.conversation.json"
+	conversationRel := ".respec/sessions/s1.conversation.json"
 	conversation := []byte(`[
   {"dt":"2026-05-01T10:00:01Z","role":"user","text":"first prompt"},
   {"dt":"2026-05-01T10:00:02Z","role":"assistant","text":"first response"}
@@ -1088,8 +1088,8 @@ func TestRunHistoryIncludesOutputWithFlag(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(repo, filepath.FromSlash(conversationRel)), conversation, 0o644); err != nil {
 		t.Fatalf("write conversation: %v", err)
 	}
-	raw := `{"session_id":"s1","timestamp":"2026-05-01T10:00:03Z","command":"copilot","args":[],"event_type":"final","exit_code":0,"conversation_log":".sd/sessions/s1.conversation.json"}` + "\n"
-	if err := os.WriteFile(filepath.Join(repo, ".sd", "interactions.ndjson"), []byte(raw), 0o644); err != nil {
+	raw := `{"session_id":"s1","timestamp":"2026-05-01T10:00:03Z","command":"copilot","args":[],"event_type":"final","exit_code":0,"conversation_log":".respec/sessions/s1.conversation.json"}` + "\n"
+	if err := os.WriteFile(filepath.Join(repo, ".respec", "interactions.ndjson"), []byte(raw), 0o644); err != nil {
 		t.Fatalf("write interactions: %v", err)
 	}
 
@@ -1158,15 +1158,15 @@ func TestRunGetReturnsSessionInputByStableNumber(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
 		t.Fatalf("mkdir .git: %v", err)
 	}
-	if err := os.MkdirAll(filepath.Join(repo, ".sd", "sessions"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(repo, ".respec", "sessions"), 0o755); err != nil {
 		t.Fatalf("mkdir sessions: %v", err)
 	}
-	stdinRel := ".sd/sessions/s1.stdin.log"
+	stdinRel := ".respec/sessions/s1.stdin.log"
 	if err := os.WriteFile(filepath.Join(repo, stdinRel), []byte("alpha\rbravo\r"), 0o644); err != nil {
 		t.Fatalf("write stdin log: %v", err)
 	}
-	raw := `{"session_id":"s1","timestamp":"2026-04-30T10:00:00Z","command":"copilot","args":[],"event_type":"final","exit_code":0,"stdin_log":".sd/sessions/s1.stdin.log","stdout_log":".sd/sessions/s1.stdout.log"}` + "\n"
-	if err := os.WriteFile(filepath.Join(repo, ".sd", "interactions.ndjson"), []byte(raw), 0o644); err != nil {
+	raw := `{"session_id":"s1","timestamp":"2026-04-30T10:00:00Z","command":"copilot","args":[],"event_type":"final","exit_code":0,"stdin_log":".respec/sessions/s1.stdin.log","stdout_log":".respec/sessions/s1.stdout.log"}` + "\n"
+	if err := os.WriteFile(filepath.Join(repo, ".respec", "interactions.ndjson"), []byte(raw), 0o644); err != nil {
 		t.Fatalf("write interactions: %v", err)
 	}
 
@@ -1258,12 +1258,12 @@ func TestAppendConversationUserMessageAppendsToExistingLog(t *testing.T) {
 
 func TestMigrateConversationLogsCreatesSingleJson(t *testing.T) {
 	repo := t.TempDir()
-	stateDir := filepath.Join(repo, ".sd")
+	stateDir := filepath.Join(repo, ".respec")
 	if err := os.MkdirAll(filepath.Join(stateDir, "sessions"), 0o755); err != nil {
 		t.Fatalf("mkdir sessions: %v", err)
 	}
-	stdinRel := ".sd/sessions/s1.stdin.log"
-	stdoutRel := ".sd/sessions/s1.stdout.log"
+	stdinRel := ".respec/sessions/s1.stdin.log"
+	stdoutRel := ".respec/sessions/s1.stdout.log"
 	if err := os.WriteFile(filepath.Join(repo, stdinRel), []byte("hello\r"), 0o644); err != nil {
 		t.Fatalf("write stdin: %v", err)
 	}

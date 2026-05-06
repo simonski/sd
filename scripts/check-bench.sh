@@ -4,7 +4,7 @@ set -euo pipefail
 MAX_PRINT_INPUT_HISTORY_NS="${MAX_PRINT_INPUT_HISTORY_NS:-250000000}"
 MAX_WRAP_WORDS_NS="${MAX_WRAP_WORDS_NS:-10000000}"
 
-output="$(go test ./cmd/sd -run '^$' -bench 'Benchmark(PrintInputHistory|WrapWordsNoSplit)$' -benchmem -count=1)"
+output="$(go test ./cmd/respec -run '^$' -bench 'Benchmark(PrintInputHistory|WrapWordsNoSplit)$' -benchmem -count=1)"
 printf '%s\n' "$output"
 
 extract_ns() {

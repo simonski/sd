@@ -27,7 +27,7 @@ func TestExtractSkillsCreatesSkillFiles(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(stateDir, "skills", "README.md")); err != nil {
 		t.Fatalf("expected skills README extracted: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(stateDir, "skills", "sd", "SKILL.md")); err != nil {
-		t.Fatalf("expected sd skill extracted: %v", err)
+	if _, err := os.Stat(filepath.Join(stateDir, "skills", "respec", "SKILL.md")); err != nil {
+		t.Fatalf("expected respec skill extracted: %v", err)
 	}
 }

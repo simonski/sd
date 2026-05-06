@@ -2,9 +2,9 @@
 
 ## Current runtime model
 
-- Single CLI binary (`cmd/sd`)
-- Local state directory `.sd/`
-- Local SQLite state in `.sd/state.db` (interactions, sessions, visibility, conversations, generated spec)
+- Single CLI binary (`cmd/respec`)
+- Local state directory `.respec/`
+- Local SQLite state in `.respec/state.db` (interactions, sessions, visibility, conversations, generated spec)
 
 ## Bounded areas
 
@@ -16,7 +16,7 @@
 
 ## Refactor direction
 
-`cmd/sd/main.go` is being decomposed into bounded files/packages while preserving behavior locked by tests.
+`cmd/respec/main.go` is being decomposed into bounded files/packages while preserving behavior locked by tests.
 
 Initial decomposition targets:
 

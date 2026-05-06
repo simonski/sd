@@ -1,6 +1,6 @@
-# `.sd/agents` bootstrap
+# `.respec/agents` bootstrap
 
-This folder is extracted by `sd init`.
+This folder is extracted by `respec init`.
 
 Purpose:
 - define role-oriented agent configuration and runbooks

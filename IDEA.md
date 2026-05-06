@@ -150,7 +150,7 @@ Hard problems identified:
 | **Breakdown** | Markdown checklist or YAML | Hierarchical work graph derived from spec. Compliance scaffold. |
 | **SDLC Profile** | YAML/TOML (or prompt instructions) | Rules for coding style, naming, branching, test coverage floors, test philosophy. |
 | **Conversation Log** | Markdown transcript | Captured engineer intent. Input to spec amendment. |
-| **`.sd/` Workspace** | Repo-local directory | Stores spec pointers, captured interaction state, and reconciliation artifacts for the wrapper. |
+| **`.respec/` Workspace** | Repo-local directory | Stores spec pointers, captured interaction state, and reconciliation artifacts for the wrapper. |
 | **Test Suite** | Language-native | Generated and/or written. Red tests from Adversary Agent; green tests from Builder Agent. |
 | **Version Graph** | Git history + spec metadata | Every spec+implementation state. Fully addressable. |
 
@@ -228,16 +228,16 @@ Profiles are composable and overridable. A team starts from a base profile and l
 
 ---
 
-## Reference Implementation v0 (CLI: `sd`)
+## Reference Implementation v0 (CLI: `respec`)
 
-- `sd` has two command classes: hardcoded product commands and pass-through agent runtime commands.
-- Hardcoded product commands include `sd init`, `sd help`, and other explicit lifecycle/config commands.
-- `sd init` creates or updates `.sd/` in the current repo, including pointers to source spec files and local state metadata.
-- `sd <agent-binary> [args...]` launches a target agentic programming binary as a transparent terminal wrapper.
-- Initial agent-runtime targets include `copilot`, `codex`, and `claude` (for example: `sd copilot`, `sd codex`, `sd claude`).
+- `respec` has two command classes: hardcoded product commands and pass-through agent runtime commands.
+- Hardcoded product commands include `respec init`, `respec help`, and other explicit lifecycle/config commands.
+- `respec init` creates or updates `.respec/` in the current repo, including pointers to source spec files and local state metadata.
+- `respec <agent-binary> [args...]` launches a target agentic programming binary as a transparent terminal wrapper.
+- Initial agent-runtime targets include `copilot`, `codex`, and `claude` (for example: `respec copilot`, `respec codex`, `respec claude`).
 - The wrapper delegates all keystrokes and terminal output end-to-end (no workflow interruption).
-- The wrapper implicitly captures the interactive stream (stdin/stdout + session metadata) as conversation intent in `.sd/`.
-- `sd spec` reconstructs/proposes the current spec by combining baseline spec files, captured conversation intent, and notable change sequences (features, bugs, and amendments inferred from diffs/history).
+- The wrapper implicitly captures the interactive stream (stdin/stdout + session metadata) as conversation intent in `.respec/`.
+- `respec spec` reconstructs/proposes the current spec by combining baseline spec files, captured conversation intent, and notable change sequences (features, bugs, and amendments inferred from diffs/history).
 - Commit-time hooks consume captured intent plus git diff to drive spec amendment proposals.
 
 ---
@@ -256,9 +256,9 @@ Profiles are composable and overridable. A team starts from a base profile and l
 
 - [ ] Review and stress-test the Agent Roles — are there gaps or overlaps?
 - [ ] Define the Spec format schema (what sections are required, what is optional?)
-- [ ] Define full Go CLI v0 command surface (hardcoded `sd` commands + pass-through agent commands)
-- [ ] Define `.sd/` layout (spec pointers, interaction logs, reconciliation outputs, metadata)
+- [ ] Define full Go CLI v0 command surface (hardcoded `respec` commands + pass-through agent commands)
+- [ ] Define `.respec/` layout (spec pointers, interaction logs, reconciliation outputs, metadata)
 - [ ] Define git hook lifecycle for commit-time reconciliation
-- [ ] Define `sd spec` assembly rules (merge/priority model across baseline spec, conversations, and code-change signals)
+- [ ] Define `respec spec` assembly rules (merge/priority model across baseline spec, conversations, and code-change signals)
 - [ ] Draft a worked example: pick a trivial piece of software and walk the full lifecycle on paper
 - [ ] Sequence the reference implementation roadmap (Go CLI + Homebrew first, then extension and MCP)

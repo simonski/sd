@@ -2,12 +2,12 @@
 
 ## Command reliability
 
-- `sd help`, `sd history`, `sd count`, `sd doctor`, `sd spec`: target **>= 99.9% successful execution** in supported local environments.
+- `respec help`, `respec history`, `respec count`, `respec doctor`, `respec spec`: target **>= 99.9% successful execution** in supported local environments.
 
 ## Performance targets (local machine, medium repository)
 
-- `sd history` on 10k interactions: target **< 1.5s**
-- `sd spec` generation on 10k interactions: target **< 4s**
+- `respec history` on 10k interactions: target **< 1.5s**
+- `respec spec` generation on 10k interactions: target **< 4s**
 
 ## Error budget policy
 

@@ -1,6 +1,6 @@
-module github.com/simonski/sd
+module github.com/simonski/respec
 
-go 1.23.0
+go 1.26.0
 
 require (
 	github.com/creack/pty v1.1.24

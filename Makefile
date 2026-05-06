@@ -1,7 +1,7 @@
 .DEFAULT_GOAL := help
 
-BINARY := sd
-PKG := ./cmd/sd
+BINARY := respec
+PKG := ./cmd/respec
 BIN_DIR := bin
 VERSION_FILE := VERSION
 VERSION ?= $(shell (cat $(VERSION_FILE) 2>/dev/null || git describe --tags --abbrev=0 2>/dev/null || echo v0.0.0) | sed 's/^v//')
@@ -25,6 +25,10 @@ help:
 	@echo "  release-check  Validate .goreleaser config"
 	@echo "  ci       Run local CI-equivalent checks"
 	@echo "  publish  Create/push release tag, publish GitHub release + Homebrew formula"
+
+clean:
+	@rm -rf bin
+	@rm -rf dist
 
 bump-version:
 	@current=$$(cat $(VERSION_FILE) 2>/dev/null || echo 0.0.0); \
@@ -53,7 +57,7 @@ vet:
 	@go vet ./...
 
 bench:
-	@go test ./cmd/sd -run ^$$ -bench Benchmark -benchmem
+	@go test ./cmd/respec -run ^$$ -bench Benchmark -benchmem
 
 bench-check:
 	@./scripts/check-bench.sh

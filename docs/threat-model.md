@@ -2,7 +2,7 @@
 
 ## Assets
 
-- Local interaction history and conversation logs in `.sd/`
+- Local interaction history and conversation logs in `.respec/`
 - Release artifacts (binary, checksums, formula updates)
 - Command contract and behavior semantics
 
@@ -10,7 +10,7 @@
 
 - User terminal environment variables
 - Wrapped agent process execution
-- Filesystem writes under repository `.sd/`
+- Filesystem writes under repository `.respec/`
 
 ## Primary threat scenarios
 
